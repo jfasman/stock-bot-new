@@ -22,10 +22,14 @@ performance without risking capital.
 
 ## Quick start
 
+Requires **Python 3.10+** (tested on 3.13). If you don't have a modern Python,
+[`uv`](https://docs.astral.sh/uv/) is the easiest way to install one without
+Homebrew: `curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.13`.
+
 ```bash
-python3 -m venv .venv
+uv venv --python 3.13 .venv     # or: python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+uv pip install -r requirements.txt   # or: pip install -r requirements.txt
 cp .env.example .env   # add Reddit credentials if you want live sentiment
 python -m stockbot.main scan --watchlist AAPL,MSFT,NVDA,TSLA,SPY
 python -m stockbot.main paper run --days 30

@@ -42,19 +42,33 @@ class OptionContract:
             return 0
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if f != f:  # NaN check
+        return default
+    return f
+
+
+def _safe_int(value, default: int = 0) -> int:
+    return int(_safe_float(value, float(default)))
+
+
 def _row_to_contract(row: pd.Series, underlying: str, expiration: str, opt_type: str) -> OptionContract:
     return OptionContract(
-        symbol=str(row.get("contractSymbol", "")),
+        symbol=str(row.get("contractSymbol", "") or ""),
         underlying=underlying,
         expiration=expiration,
-        strike=float(row.get("strike", 0.0)),
+        strike=_safe_float(row.get("strike")),
         option_type=opt_type,
-        bid=float(row.get("bid", 0.0) or 0.0),
-        ask=float(row.get("ask", 0.0) or 0.0),
-        last=float(row.get("lastPrice", 0.0) or 0.0),
-        volume=int(row.get("volume", 0) or 0),
-        open_interest=int(row.get("openInterest", 0) or 0),
-        implied_vol=float(row.get("impliedVolatility", 0.0) or 0.0),
+        bid=_safe_float(row.get("bid")),
+        ask=_safe_float(row.get("ask")),
+        last=_safe_float(row.get("lastPrice")),
+        volume=_safe_int(row.get("volume")),
+        open_interest=_safe_int(row.get("openInterest")),
+        implied_vol=_safe_float(row.get("impliedVolatility")),
         in_the_money=bool(row.get("inTheMoney", False)),
     )
 

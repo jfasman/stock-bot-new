@@ -1,0 +1,51 @@
+portfolio:
+  starting_cash: 100000
+  target_annual_return: 0.40
+  max_position_pct: 0.08        # no single position > 8% of equity
+  max_open_positions: 12
+  cash_reserve_pct: 0.10        # always keep 10% in cash
+
+risk:
+  stop_loss_pct: 0.07           # equity stop: -7%
+  take_profit_pct: 0.15         # equity target: +15%
+  option_stop_loss_pct: 0.40    # options decay fast; wider stop
+  option_take_profit_pct: 0.75
+  max_daily_drawdown_pct: 0.04  # halt new entries if portfolio drops 4% in a day
+
+strategy:
+  swing_lookback_days: 60
+  rsi_oversold: 30
+  rsi_overbought: 70
+  min_avg_volume: 500000
+  sentiment_weight: 0.4         # 0..1 blend between TA and sentiment
+  min_score_to_trade: 0.55      # composite score threshold
+  bear_score_to_trade: -0.55    # mirror threshold for puts/shorts
+
+options:
+  enabled: true
+  prefer_dte_min: 21
+  prefer_dte_max: 45
+  delta_target_long: 0.55       # moderately ITM for directional bets
+  delta_target_protect: 0.30    # for hedges
+  max_premium_pct: 0.03         # single option spend <= 3% of equity
+
+sentiment:
+  reddit_subs: [wallstreetbets, stocks, options, investing, StockMarket]
+  reddit_post_limit: 200
+  reddit_comment_limit: 50
+  stocktwits_message_limit: 30
+  cache_minutes: 15
+
+watchlist:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMD
+  - TSLA
+  - META
+  - GOOGL
+  - AMZN
+  - SPY
+  - QQQ
+  - COIN
+  - PLTR

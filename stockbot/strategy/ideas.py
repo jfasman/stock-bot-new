@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Iterable, List, Optional
+
+from ..config import Config
+from ..data import options as opt_data
+from ..data import prices as price_data
+from ..sentiment.aggregator import AggregateSentiment, aggregate
+from .scorer import TechnicalRead, composite_score, read_technicals
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class Idea:
+    ticker: str
+    direction: str            # 'long' | 'short' (informational; we use long puts for short)
+    instrument: str           # 'equity' | 'call' | 'put'
+    score: float              # signed composite, -1..1
+    last_price: float
+    rsi: float
+    reasons: List[str]
+    sentiment_net: float
+    sentiment_confidence: float
+    option_symbol: Optional[str] = None
+    option_strike: Optional[float] = None
+    option_expiration: Optional[str] = None
+    option_mid: Optional[float] = None
+    option_dte: Optional[int] = None
+
+    def headline(self) -> str:
+        if self.instrument == "equity":
+            return f"{self.ticker} LONG (score {self.score:+.2f})"
+        side = "CALL" if self.instrument == "call" else "PUT"
+        strike = f"{self.option_strike:.1f}" if self.option_strike else "?"
+        exp = self.option_expiration or "?"
+        return f"{self.ticker} {side} {strike} {exp} (score {self.score:+.2f})"
+
+
+def _build_option_idea(
+    cfg: Config,
+    ticker: str,
+    direction: str,
+    spot: float,
+    score: float,
+    tech: TechnicalRead,
+    sentiment: Optional[AggregateSentiment],
+    reasons: List[str],
+) -> Optional[Idea]:
+    opts = cfg.options
+    if not opts.get("enabled", True):
+        return None
+    contract = opt_data.pick_contract(
+        ticker=ticker,
+        direction=direction,
+        spot=spot,
+        dte_min=int(opts.get("prefer_dte_min", 21)),
+        dte_max=int(opts.get("prefer_dte_max", 45)),
+        moneyness=0.0,
+    )
+    if contract is None or contract.mid <= 0:
+        return None
+    return Idea(
+        ticker=ticker,
+        direction="long" if direction == "call" else "short",
+        instrument=direction,
+        score=score,
+        last_price=spot,
+        rsi=tech.rsi,
+        reasons=reasons,
+        sentiment_net=sentiment.net if sentiment else 0.0,
+        sentiment_confidence=sentiment.confidence if sentiment else 0.0,
+        option_symbol=contract.symbol,
+        option_strike=contract.strike,
+        option_expiration=contract.expiration,
+        option_mid=contract.mid,
+        option_dte=contract.dte,
+    )
+
+
+def generate_ideas(cfg: Config, tickers: Iterable[str]) -> List[Idea]:
+    tickers = [t.upper() for t in tickers]
+    sentiments = aggregate(cfg, tickers)
+    min_long = float(cfg.strategy.get("min_score_to_trade", 0.55))
+    min_short = float(cfg.strategy.get("bear_score_to_trade", -0.55))
+
+    ideas: List[Idea] = []
+    for t in tickers:
+        df = price_data.get_history(t, period="6mo", interval="1d")
+        tech = read_technicals(df, cfg)
+        if tech is None:
+            log.info("Skip %s: not enough price history", t)
+            continue
+        sentiment = sentiments.get(t)
+        score, reasons = composite_score(cfg, tech, sentiment)
+
+        if score >= min_long:
+            ideas.append(
+                Idea(
+                    ticker=t,
+                    direction="long",
+                    instrument="equity",
+                    score=score,
+                    last_price=tech.last,
+                    rsi=tech.rsi,
+                    reasons=reasons,
+                    sentiment_net=sentiment.net if sentiment else 0.0,
+                    sentiment_confidence=sentiment.confidence if sentiment else 0.0,
+                )
+            )
+            opt_idea = _build_option_idea(cfg, t, "call", tech.last, score, tech, sentiment, reasons)
+            if opt_idea:
+                ideas.append(opt_idea)
+        elif score <= min_short:
+            opt_idea = _build_option_idea(cfg, t, "put", tech.last, score, tech, sentiment, reasons)
+            if opt_idea:
+                ideas.append(opt_idea)
+
+    ideas.sort(key=lambda i: abs(i.score), reverse=True)
+    return ideas

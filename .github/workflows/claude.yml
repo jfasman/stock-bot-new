@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: anthropics/claude-code-action@v1
+      # Pinned past the @v1 Bun regression (issue #1319). Revert to @v1
+      # once the upstream fix lands.
+      - uses: anthropics/claude-code-action@86eb26bf0139bdd75acd15ea5f00f45ee0a284c2
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

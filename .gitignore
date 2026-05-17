@@ -11,6 +11,7 @@ env/
 .vscode/
 *.log
 data/*.db
+data/*.db.bak
 data/*.sqlite
 data/cache/
 .pytest_cache/

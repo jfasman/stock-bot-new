@@ -52,6 +52,58 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     ts TEXT PRIMARY KEY,
     equity REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    score REAL,
+    suggested_weight REAL,
+    expected_return REAL,
+    return_stdev REAL,
+    horizon_days INTEGER,
+    stop_price REAL,
+    target_price REAL,
+    invalidation TEXT,
+    config_hash TEXT,
+    payload_json TEXT NOT NULL,
+    executed INTEGER NOT NULL DEFAULT 0,
+    executed_position_id INTEGER,
+    FOREIGN KEY(executed_position_id) REFERENCES positions(id)
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    event TEXT NOT NULL,
+    actor TEXT,
+    payload_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS config_snapshots (
+    hash TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    config_yaml TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trade_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id INTEGER,
+    entry_rationale TEXT,
+    exit_rationale TEXT,
+    post_mortem TEXT,
+    tags TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(position_id) REFERENCES positions(id)
+);
+
+CREATE TABLE IF NOT EXISTS guardrail_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 

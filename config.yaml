@@ -36,6 +36,52 @@ sentiment:
   stocktwits_message_limit: 30
   cache_minutes: 15
 
+data:
+  vendor: yfinance        # yfinance | polygon | alphavantage | iex (paid stubs)
+
+factors:
+  weights:                # set sector_neutral: false to disable cross-sector centering
+    value: 0.20
+    momentum: 0.30
+    quality: 0.20
+    lowvol: 0.10
+    size: 0.05
+    meanrev: 0.15
+  sector_neutral: true
+
+backtest:
+  starting_cash: 100000
+  rebalance_days: 5
+  max_position_weight: 0.10
+
+risk_advanced:
+  var_horizon_days: 1
+  var_lookback_days: 504
+  portfolio_vega_threshold: 5000
+  portfolio_gamma_threshold: 500
+  max_sector_pct: 0.30
+  max_gross_exposure: 1.50
+  max_net_exposure: 1.00
+  target_beta_range: [-0.20, 1.20]
+  correlation_warn_threshold: 0.85
+
+guardrails:
+  loss_cooldown_hours: 24
+  max_concentration: 0.30
+  max_leverage: 1.00
+  override_requires_steps: 2
+
+leveraged_etfs:
+  enabled: true
+  max_leverage_factor: 3              # cap |leverage| we'll suggest (1=no leverage, 3=3x)
+  prefer_inverse_over_short: true     # bias bear views toward inverse ETFs vs put options
+  leveraged_long_threshold: 0.85      # require very high conviction to suggest +2x/+3x longs
+  max_gross_leverage: 1.50            # portfolio-wide |weight * leverage| sum cap
+
+compliance:
+  enforce_pdt_check: true
+  track_wash_sales: true
+
 watchlist:
   - AAPL
   - MSFT

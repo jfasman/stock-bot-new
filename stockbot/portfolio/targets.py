@@ -18,12 +18,22 @@ class TargetStatus:
     delta_vs_expected: float      # dollars
 
     def headline(self) -> str:
+        # Annualizing < ~20 trading days of P&L produces noise the eye reads as a forecast.
+        # Suppress until we have a meaningful sample.
+        if self.days_elapsed < 20:
+            return (
+                f"Target {self.target_annual*100:.0f}%/yr | "
+                f"day {self.days_elapsed} of {20}+ warm-up | "
+                f"return {self.actual_return*100:+.2f}% | "
+                f"WARM-UP — annualization not yet meaningful"
+            )
+        status = "ON TRACK" if self.on_track else "OFF TRACK"
         return (
             f"Target {self.target_annual*100:.0f}%/yr | "
             f"day {self.days_elapsed} | "
             f"return {self.actual_return*100:+.2f}% "
             f"(annualized {self.annualized_return*100:+.2f}%) | "
-            f"{'ON TRACK' if self.on_track else 'OFF TRACK'} "
+            f"{status} "
             f"({self.delta_vs_expected:+,.0f} vs expected)"
         )
 

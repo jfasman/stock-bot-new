@@ -120,10 +120,222 @@ def report(ctx: click.Context, show_closed: bool) -> None:
 
 
 @cli.command()
+@click.option("--start", required=True, help="Backtest start date YYYY-MM-DD.")
+@click.option("--end", required=True, help="Backtest end date YYYY-MM-DD.")
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.option("--rebalance-days", type=int, default=5, show_default=True)
+@click.option("--starting-cash", type=float, default=100_000.0, show_default=True)
 @click.pass_context
-def backtest(ctx: click.Context) -> None:
-    """(stub) Historical backtest. Coming soon."""
-    console.print("[yellow]Backtester stub — not implemented yet.[/yellow]")
+def backtest(ctx: click.Context, start: str, end: str, watchlist: str | None,
+             rebalance_days: int, starting_cash: float) -> None:
+    """Run a walk-forward-ready backtest over the watchlist using the factor model."""
+    from .backtest import Backtester
+    from .data import prices as price_data
+    from .data.fundamentals import get_fundamentals
+    from .strategy.factors import FactorWeights, score_universe
+
+    cfg = ctx.obj["cfg"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+    console.print(f"[dim]Loading price history for {len(tickers)} tickers…[/dim]")
+    history = {t: price_data.get_history(t, period="5y", interval="1d") for t in tickers}
+    fundamentals = {t: get_fundamentals(t) for t in tickers}
+
+    bt = Backtester(history, starting_cash=starting_cash, rebalance_freq=rebalance_days)
+
+    weights = FactorWeights()
+
+    def signal_fn(asof, sliced_history):
+        # Build target weights from current factor composite. Long top-quintile only.
+        report = score_universe(tickers, fundamentals, sliced_history, weights=weights)
+        ranked = sorted(report.composite.items(), key=lambda kv: kv[1], reverse=True)
+        n_long = max(1, len(ranked) // 5)
+        positive = [(t, s) for t, s in ranked[:n_long] if s > 0]
+        if not positive:
+            return {}
+        weight = 1.0 / len(positive)
+        return {t: weight for t, _ in positive}
+
+    result = bt.run(signal_fn, start=start, end=end)
+    console.print(f"[bold]{result.metrics.headline()}[/bold]")
+    console.print(f"trades: {len(result.trades)} (closed {sum(1 for t in result.trades if t.closed)})")
+
+
+@cli.command(name="risk-report")
+@click.pass_context
+def risk_report(ctx: click.Context) -> None:
+    """Show VaR/CVaR and portfolio Greeks for current positions."""
+    from .data import prices as price_data
+    from .portfolio.greeks_agg import aggregate_greeks
+    from .portfolio.var import historical_var, parametric_var, portfolio_returns
+
+    cfg = ctx.obj["cfg"]
+    portfolio = ctx.obj["portfolio"]
+    open_pos = portfolio.list_open()
+    if not open_pos:
+        console.print("[yellow]No open positions.[/yellow]")
+        return
+
+    # Build per-ticker price history and weights.
+    mark_prices = {p.ticker: price_data.get_last_price(p.ticker) or p.entry_price for p in open_pos}
+    equity = portfolio.equity(mark_prices)
+    positions_for_var = []
+    history = {}
+    for p in open_pos:
+        weight = (p.market_value(mark_prices[p.ticker]) / equity) if equity > 0 else 0.0
+        positions_for_var.append({"ticker": p.ticker, "weight": weight})
+        history[p.ticker] = price_data.get_history(p.ticker, period="2y", interval="1d")
+    rets = portfolio_returns(positions_for_var, history)
+    par = parametric_var(rets, equity)
+    hist = historical_var(rets, equity)
+    console.print(f"[bold]VaR (1-day, parametric)[/bold] 95%: ${par.var_95:,.0f}  99%: ${par.var_99:,.0f}")
+    console.print(f"[bold]CVaR (1-day, parametric)[/bold] 95%: ${par.cvar_95:,.0f}  99%: ${par.cvar_99:,.0f}")
+    console.print(f"[bold]VaR (1-day, historical)[/bold] 95%: ${hist.var_95:,.0f}  99%: ${hist.var_99:,.0f}")
+
+    g = aggregate_greeks(portfolio)
+    console.print(
+        f"[bold]Portfolio Greeks[/bold] Δ {g.delta:+,.1f}  Γ {g.gamma:+,.2f}  "
+        f"Θ {g.theta:+,.0f}/d  ν {g.vega:+,.0f}/1%  ρ {g.rho:+,.0f}/1%"
+    )
+    for b in g.thresholds_breached:
+        console.print(f"  [red]⚠ {b}[/red]")
+
+
+@cli.command(name="rec-log")
+@click.option("--limit", type=int, default=25, show_default=True)
+@click.pass_context
+def rec_log(ctx: click.Context, limit: int) -> None:
+    """Show recent recommendations (executed or not)."""
+    from .ops.recommendation_log import recent, hit_rate
+
+    rows = recent(limit)
+    if not rows:
+        console.print("[yellow]No recommendations logged yet.[/yellow]")
+        return
+    for r in rows:
+        flag = "[green]EXEC[/green]" if r.get("executed") else "[dim]SKIP[/dim]"
+        console.print(
+            f"#{r['id']} {r['ts']} {flag} {r['ticker']} {r['instrument']} "
+            f"{r['direction']} score {r.get('score', 0.0):+.2f}"
+        )
+    rate = hit_rate(limit)
+    console.print(
+        f"[bold]Execution rate[/bold]: {rate['executed']}/{rate['total']} "
+        f"recs placed ({rate['rate']*100:.0f}%) | avg score {rate['avg_score']:+.2f}"
+    )
+    console.print(
+        "[dim](Skips reflect guardrails, sizing limits, or insufficient cash — "
+        "logging every recommendation is required by the audit policy.)[/dim]"
+    )
+
+
+@cli.command(name="stress")
+@click.pass_context
+def stress_cmd(ctx: click.Context) -> None:
+    """Replay current portfolio composition through historical stress regimes."""
+    from .data import prices as price_data
+    from .portfolio.stress import stress_test
+
+    portfolio = ctx.obj["portfolio"]
+    open_pos = portfolio.list_open()
+    if not open_pos:
+        console.print("[yellow]No open positions to stress.[/yellow]")
+        return
+    mark_prices = {p.ticker: price_data.get_last_price(p.ticker) or p.entry_price for p in open_pos}
+    equity = portfolio.equity(mark_prices)
+    positions = [
+        {
+            "ticker": p.ticker,
+            "weight": (p.market_value(mark_prices[p.ticker]) / equity) if equity > 0 else 0.0,
+        }
+        for p in open_pos
+    ]
+    history = {p.ticker: price_data.get_history(p.ticker, period="max", interval="1d") for p in open_pos}
+    results = stress_test(positions, history)
+    for r in results:
+        console.print(
+            f"[bold]{r.regime}[/bold] [{r.start} → {r.end}]  "
+            f"ret {r.portfolio_return*100:+.1f}%  worstDay {r.worst_day*100:+.1f}%  DD {r.drawdown*100:.1f}%"
+        )
+
+
+@cli.command()
+@click.argument("ticker")
+@click.option("--no-factors", is_flag=True, help="Skip the slower factor-model breakdown.")
+@click.pass_context
+def explain(ctx: click.Context, ticker: str, no_factors: bool) -> None:
+    """Show the full breakdown behind a ticker's composite score."""
+    from .strategy.score_explain import explain_score
+
+    cfg = ctx.obj["cfg"]
+    b = explain_score(cfg, ticker, include_factors=not no_factors)
+    if b is None:
+        console.print(f"[yellow]Not enough price history to score {ticker.upper()}.[/yellow]")
+        return
+
+    color = "green" if b.classification == "LONG" else "red" if b.classification == "SHORT" else "yellow"
+    console.print(
+        f"[bold]{b.ticker}[/bold]  last ${b.last_price:,.2f}  "
+        f"score [bold {color}]{b.final_score:+.3f}[/bold {color}]  → {b.classification}"
+    )
+    console.print(
+        f"  thresholds: long ≥ {b.thresholds['min_long']:+.2f}, "
+        f"short ≤ {b.thresholds['min_short']:+.2f}"
+    )
+
+    console.print("\n[bold]Technical sub-signals[/bold] (inside the technical block)")
+    for c in b.tech_components:
+        console.print(
+            f"  {c.name:<10} value {c.value:+.3f}  × weight {c.weight:.2f}  "
+            f"= contribution {c.contribution:+.3f}"
+        )
+    console.print(f"  → tech_composite = {b.tech_composite:+.3f}")
+
+    console.print(
+        f"\n[bold]Sentiment[/bold]  net {b.sentiment_net:+.2f}  "
+        f"confidence {b.sentiment_confidence:.2f}  "
+        f"subscore {b.sentiment_subscore:+.3f}  "
+        f"(blend weight {b.sentiment_weight:.2f})"
+    )
+
+    console.print("\n[bold]Final blend[/bold]")
+    for c in b.blended_components:
+        console.print(
+            f"  {c.name:<18} value {c.value:+.3f}  × weight {c.weight:.2f}  "
+            f"= contribution {c.contribution:+.3f}"
+        )
+    for line in b.formula().split("\n"):
+        console.print(f"  [dim]{line}[/dim]")
+
+    console.print("\n[bold]Indicator readings[/bold]")
+    i = b.indicators
+    console.print(
+        f"  RSI(14) {i.rsi_14:.1f} ({i.rsi_label()})  "
+        f"MACD hist {i.macd_hist_last:+.3f}  "
+        f"SMA20 {i.sma_20:.2f}  SMA50 {i.sma_50:.2f}  "
+        f"trend: {i.trend_label()}"
+    )
+    console.print(
+        f"  Bollinger: [{i.bollinger_lower:.2f} – {i.bollinger_upper:.2f}]  "
+        f"position {i.bollinger_pct*100:.0f}% of band  "
+        f"avg-vol-20d {i.avg_volume_20:,.0f}"
+    )
+
+    if b.factor_scores:
+        console.print("\n[bold]Factor model (parallel cross-section signal)[/bold]")
+        for name, val in b.factor_scores.items():
+            console.print(f"  {name:<10} {val:+.3f}")
+        if b.factor_composite is not None:
+            console.print(f"  → factor_composite = {b.factor_composite:+.3f}")
+
+    if b.reasons:
+        console.print("\n[bold]Reasons[/bold]")
+        for r in b.reasons:
+            console.print(f"  • {r}")
+
+    if b.warnings:
+        console.print("\n[bold yellow]Warnings[/bold yellow]")
+        for w in b.warnings:
+            console.print(f"  ⚠ {w}")
 
 
 if __name__ == "__main__":

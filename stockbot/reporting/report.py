@@ -41,7 +41,10 @@ def render_ideas(ideas: Iterable[Idea]) -> None:
     table.add_column("Details")
     for i in ideas:
         side = i.instrument.upper()
-        if i.instrument != "equity":
+        if i.instrument == "etf":
+            via = f" via {i.alternative_to}" if i.alternative_to and i.alternative_to != i.ticker else ""
+            side = f"ETF {i.leverage_factor:+.0f}x{via}"
+        elif i.instrument != "equity":
             strike = f"{i.option_strike:.1f}" if i.option_strike else "?"
             exp = i.option_expiration or "?"
             side = f"{i.instrument.upper()} {strike} {exp}"
@@ -80,7 +83,11 @@ def render_portfolio(cfg: Config, portfolio: Portfolio) -> None:
         pnl = p.unrealized_pnl(mark)
         unrealized += pnl
         type_label = p.instrument.upper()
-        if p.instrument != "equity":
+        if p.instrument == "etf":
+            from ..strategy import leveraged_etfs as letfs
+            lev = letfs.effective_leverage(p.ticker)
+            type_label = f"ETF {lev:+.0f}x"
+        elif p.instrument != "equity":
             strike = f"{p.option_strike:.1f}" if p.option_strike else "?"
             exp = p.option_expiration or "?"
             type_label = f"{p.instrument.upper()} {strike} {exp}"

@@ -104,6 +104,28 @@ CREATE TABLE IF NOT EXISTS guardrail_state (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS conviction_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,                       -- ISO datetime of evaluation
+    ticker TEXT NOT NULL,
+    instrument TEXT NOT NULL,               -- 'equity' | 'call' | 'put' | 'etf'
+    direction TEXT NOT NULL,                -- 'long' | 'short'
+    score REAL NOT NULL,                    -- idea.score (signed)
+    overall_passed INTEGER NOT NULL,        -- 1 iff every gate passed
+    score_passed INTEGER NOT NULL,
+    factor_agreement_passed INTEGER NOT NULL,
+    regime_passed INTEGER NOT NULL,
+    setup_validated_passed INTEGER NOT NULL,
+    cooldown_passed INTEGER NOT NULL,
+    data_quality_passed INTEGER NOT NULL,
+    verdicts_json TEXT NOT NULL,            -- {gate: {passed, reason}}
+    pick_json TEXT,                         -- ConvictionPick serialized; NULL if rejected
+    config_hash TEXT                        -- reproducibility per discipline norm #2
+);
+
+CREATE INDEX IF NOT EXISTS idx_conviction_log_ticker_ts
+    ON conviction_log(ticker, ts DESC);
 """
 
 

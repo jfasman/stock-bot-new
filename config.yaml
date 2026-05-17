@@ -82,6 +82,22 @@ compliance:
   enforce_pdt_check: true
   track_wash_sales: true
 
+conviction:                          # second-layer alert gate; roadmap §13.1
+  notify_threshold: 0.70             # |score| floor for alerting; mirrors strategy.min_score_to_trade (0.55)
+  cooldown_hours: 24                 # no re-alert for the same ticker within this window
+  setup_validation_max_age_days: 180 # walk-forward validation must be at least this fresh
+  min_setup_trades: 20               # fail closed below this sample size
+  regime:
+    vix_max_long: 28
+    vix_max_short: 45
+    yield_curve_inverted_blocks:     # setup names rejected when 10y-2y < 0
+      - breakout_with_momentum
+    vix_cap_exempt_setups:           # setup names that may pass even when VIX > cap
+      - mean_reversion_oversold
+  data_quality:
+    max_price_age_seconds: 900       # 15 min during market hours
+    max_fundamentals_age_seconds: 604800   # 7 days
+
 watchlist:
   - AAPL
   - MSFT

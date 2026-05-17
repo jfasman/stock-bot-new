@@ -42,6 +42,10 @@ class Config:
     def watchlist(self) -> List[str]:
         return [s.upper() for s in self.raw.get("watchlist", [])]
 
+    @property
+    def conviction(self) -> Dict[str, Any]:
+        return self.raw.get("conviction", {})
+
 
 def load_config(path: str | Path | None = None) -> Config:
     """Load config.yaml from the project root (or supplied path) and .env credentials."""

@@ -113,16 +113,20 @@ def paper_close(ctx, position_id, price):
 def paper_convict(ctx: click.Context, watchlist: str | None) -> None:
     """Run the conviction gate over current ideas; persist verdicts (roadmap §13.1).
 
-    Cluster 1 behavior: no setup library and no factor fusion yet, so
-    `setup_validated` and `factor_agreement` fail closed for every
-    idea. The audit row in `conviction_log` records why each gate
-    voted the way it did.
+    Per-ticker pipeline: price history → TechnicalRead → setup match
+    → fundamentals → assembler → evaluate → log. `factor_composite`
+    is still None (Cluster 4 wires it); `setup_validated` will fail
+    closed for any setup whose walk-forward expectancy hasn't been
+    recorded in `setup_performance` yet (Cluster 2 / step 2D).
     """
     from .data import macro as macro_data
+    from .data import prices as price_data
+    from .data.fundamentals import get_fundamentals
     from .ops.config_snapshot import hash_config, snapshot as snap_config
     from .ops.conviction_log import log_evaluation
     from .strategy.conviction import evaluate
     from .strategy.conviction_context import build_context
+    from .strategy.scorer import read_technicals
 
     cfg = ctx.obj["cfg"]
     tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
@@ -137,13 +141,28 @@ def paper_convict(ctx: click.Context, watchlist: str | None) -> None:
     macro = macro_data.snapshot()
     console.print(f"[dim]Macro: VIX={macro.vix} curve(2s10s)={macro.yield_curve_2s10s}bps[/dim]")
 
+    # Cache per-ticker reads so options/ETF ideas for the same underlying don't refetch.
+    tech_cache: dict[str, object] = {}
+    fund_cache: dict[str, object] = {}
+
     n_pass = 0
     for idea in ideas:
-        gate_ctx = build_context(cfg, idea, macro=macro)
+        if idea.ticker not in tech_cache:
+            df = price_data.get_history(idea.ticker, period="6mo", interval="1d")
+            tech_cache[idea.ticker] = read_technicals(df, cfg)
+            fund_cache[idea.ticker] = get_fundamentals(idea.ticker)
+        gate_ctx = build_context(
+            cfg, idea, macro=macro,
+            tech=tech_cache[idea.ticker],
+            fundamentals=fund_cache[idea.ticker],
+        )
         pick, verdicts = evaluate(idea, gate_ctx)
         log_evaluation(idea, verdicts, pick, config_hash=cfg_hash)
         marker = "[green]PASS[/green]" if pick else "[red]FAIL[/red]"
-        console.print(f"{marker} {idea.ticker:<6} score={idea.score:+.2f}")
+        setup_note = ""
+        if gate_ctx.matched_setup is not None:
+            setup_note = f" [dim]matched={gate_ctx.matched_setup.name}[/dim]"
+        console.print(f"{marker} {idea.ticker:<6} score={idea.score:+.2f}{setup_note}")
         for name, result in verdicts.items():
             tick = "[green]✓[/green]" if result.passed else "[red]✗[/red]"
             console.print(f"   {tick} {name:<18} {result.reason}")

@@ -3,19 +3,18 @@
 `strategy/conviction.py` defines the gates as pure functions over
 `(Idea, GateContext)`. This module is the impure layer that builds
 `GateContext` from the live system — config, macro snapshot, audit
-log, and (eventually) the setup library and factor model.
+log, setup library, and (eventually) the factor model.
 
-Cluster 1 limitations (each documented at its stub):
-  - `matched_setup` is always None (Cluster 2 ships the setup library)
-  - `factor_composite` is always None (Cluster 4 fuses factors into
-    the live score; until then the per-name cross-sectional run is
-    too expensive to invoke per idea)
+Status:
+  - `matched_setup` is wired through `strategy/setups/matcher.py`
+    when the caller supplies `tech` (and optionally `fundamentals`
+    and `options`). When inputs aren't supplied, falls back to None
+    (gate fails closed).
+  - `factor_composite` is still always None (Cluster 4 fuses factors
+    into the live score; until then the per-name cross-sectional run
+    is too expensive to invoke per idea).
   - Data-quality flags are stubbed fresh; no fetch-time tracking
-    exists in `data/prices.py` yet
-
-Both `None`s cause their respective gates to fail closed, which is
-the roadmap's "never alert on an unvalidated setup" / "no agreement is
-not agreement" discipline. The audit row still shows why.
+    exists in `data/prices.py` yet.
 """
 from __future__ import annotations
 
@@ -24,7 +23,9 @@ from typing import Optional
 
 from ..config import Config
 from ..data import macro as macro_data
+from ..data.fundamentals import Fundamentals
 from ..ops import conviction_log
+from ..ops.setup_performance import get_performance
 from .conviction import (
     ConvictionThresholds,
     GateContext,
@@ -32,6 +33,10 @@ from .conviction import (
     MatchedSetup,
 )
 from .ideas import Idea
+from .scorer import TechnicalRead
+from .setups import Setup
+from .setups.matcher import match, pick_best
+from .setups.types import OptionsContext
 
 
 def build_thresholds(cfg: Config) -> ConvictionThresholds:
@@ -65,6 +70,53 @@ def to_gate_macro(raw: macro_data.MacroSnapshot) -> MacroSnapshot:
     return MacroSnapshot(vix=vix, yield_curve_slope_bps=curve)
 
 
+def resolve_matched_setup(
+    tech: Optional[TechnicalRead],
+    fundamentals: Optional[Fundamentals],
+    options: Optional[OptionsContext],
+    macro: macro_data.MacroSnapshot,
+) -> Optional[MatchedSetup]:
+    """Run the setup matcher, pick the best by walk-forward
+    expectancy, and wrap the result as a `MatchedSetup`.
+
+    Returns None when:
+      - `tech` isn't supplied (caller couldn't fetch indicator data)
+      - no setup matches the inputs
+      - the matched setup has no walk-forward row yet
+        (setup_performance is empty for this name)
+
+    Each `None` path is "fail closed" — the gate's
+    setup_validated check rejects.
+    """
+    if tech is None:
+        return None
+    matches = match(tech, fundamentals, options, macro)
+    if not matches:
+        return None
+    perf_lookup: dict[str, object] = {}
+    for s in matches:
+        perf = get_performance(s.name)
+        if perf is not None:
+            perf_lookup[s.name] = perf
+    best: Optional[Setup] = pick_best(matches, perf_lookup)  # type: ignore[arg-type]
+    if best is None:
+        return None
+    perf = perf_lookup.get(best.name)
+    if perf is None:
+        # Matched but no walk-forward data — gate will fail closed on
+        # n_trades < min_setup_trades; surface that via a zero-row.
+        return MatchedSetup(
+            name=best.name, direction=best.direction,
+            n_trades=0, expectancy=0.0,
+            last_validated_at=datetime.min,
+        )
+    return MatchedSetup(
+        name=best.name, direction=best.direction,
+        n_trades=perf.n_trades, expectancy=perf.expectancy,
+        last_validated_at=perf.last_validated_at,
+    )
+
+
 def build_context(
     cfg: Config,
     idea: Idea,
@@ -73,16 +125,23 @@ def build_context(
     macro: Optional[macro_data.MacroSnapshot] = None,
     matched_setup: Optional[MatchedSetup] = None,
     factor_composite: Optional[float] = None,
+    tech: Optional[TechnicalRead] = None,
+    fundamentals: Optional[Fundamentals] = None,
+    options: Optional[OptionsContext] = None,
 ) -> GateContext:
     """Build a GateContext for a single idea.
 
     Caller may pre-fetch `macro` to amortize cost across many ideas.
-    `matched_setup` and `factor_composite` are caller-injectable for
-    forward-compat with Cluster 2 (setup library) and Cluster 4
-    (factor fusion); both default to None and fail their gates closed.
+    When `tech` is supplied, the matcher runs automatically and
+    `matched_setup` is derived from the highest-expectancy match
+    (overriding any explicit `matched_setup` arg). Pass
+    `matched_setup` explicitly when you want to bypass the matcher
+    (tests, fixtures).
     """
     when = now or datetime.utcnow()
     raw_macro = macro if macro is not None else macro_data.snapshot()
+    if matched_setup is None and tech is not None:
+        matched_setup = resolve_matched_setup(tech, fundamentals, options, raw_macro)
     return GateContext(
         thresholds=build_thresholds(cfg),
         factor_composite=factor_composite,

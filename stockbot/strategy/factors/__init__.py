@@ -5,6 +5,7 @@ from .lowvol import lowvol_score
 from .size import size_score
 from .meanrev import meanrev_score
 from .composite import FactorWeights, score_universe, FactorReport
+from .universe import build_universe, resolve_peer_pool
 
 __all__ = [
     "value_score",
@@ -16,4 +17,6 @@ __all__ = [
     "FactorWeights",
     "FactorReport",
     "score_universe",
+    "build_universe",
+    "resolve_peer_pool",
 ]

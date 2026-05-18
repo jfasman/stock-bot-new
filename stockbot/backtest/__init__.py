@@ -1,3 +1,4 @@
+from .compare_fusion import FusionComparison, compare_fusion
 from .costs import CostModel, default_equity_costs, default_option_costs
 from .engine import Backtester, BacktestResult, Trade
 from .metrics import compute_metrics, deflated_sharpe
@@ -14,4 +15,6 @@ __all__ = [
     "deflated_sharpe",
     "walk_forward",
     "WalkForwardWindow",
+    "FusionComparison",
+    "compare_fusion",
 ]

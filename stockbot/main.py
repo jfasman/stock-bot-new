@@ -373,6 +373,61 @@ def backtest(ctx: click.Context, start: str, end: str, watchlist: str | None,
         console.print("[yellow]No trades carried a setup_name; setup_performance untouched.[/yellow]")
 
 
+@cli.command(name="backtest-fusion")
+@click.option("--start", required=True, help="Backtest start date YYYY-MM-DD.")
+@click.option("--end", required=True, help="Backtest end date YYYY-MM-DD.")
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.option("--rebalance-days", type=int, default=5, show_default=True)
+@click.option("--starting-cash", type=float, default=100_000.0, show_default=True)
+@click.option("--top-quintile", type=float, default=0.20, show_default=True,
+              help="Long the top fraction of ranked names; 0.20 = top quintile.")
+@click.pass_context
+def backtest_fusion(ctx: click.Context, start: str, end: str, watchlist: str | None,
+                    rebalance_days: int, starting_cash: float, top_quintile: float) -> None:
+    """Side-by-side: unfused (legacy two-way) vs fused (three-way) backtest.
+
+    Roadmap §13.6: the empirical answer to "did fusion help?" Both legs run
+    on the same window, the same PIT data, the same scoring code-path —
+    differing only in whether the factor composite is folded into the
+    per-ticker score.
+    """
+    from .backtest.compare_fusion import compare_fusion
+    from .data import prices as price_data
+    from .data.fundamentals import get_fundamentals
+
+    cfg = ctx.obj["cfg"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+    console.print(f"[dim]Loading price + fundamentals for {len(tickers)} tickers…[/dim]")
+    history = {t: price_data.get_history(t, period="5y", interval="1d") for t in tickers}
+    fundamentals = {t: get_fundamentals(t) for t in tickers}
+
+    cmp = compare_fusion(
+        cfg, history, fundamentals, start, end,
+        starting_cash=starting_cash,
+        rebalance_freq=rebalance_days,
+        top_quintile=top_quintile,
+    )
+
+    console.print(f"\n[bold]Window {cmp.start} → {cmp.end}[/bold]")
+    console.print(
+        f"  unfused: CAGR {cmp.unfused.cagr:+.2%}  Sharpe {cmp.unfused.sharpe:+.2f}  "
+        f"maxDD {cmp.unfused.max_drawdown:.2%}  trades {cmp.unfused_trades}"
+    )
+    console.print(
+        f"  fused  : CAGR {cmp.fused.cagr:+.2%}  Sharpe {cmp.fused.sharpe:+.2f}  "
+        f"maxDD {cmp.fused.max_drawdown:.2%}  trades {cmp.fused_trades}"
+    )
+    delta_cagr = cmp.fused.cagr - cmp.unfused.cagr
+    delta_sharpe = cmp.fused.sharpe - cmp.unfused.sharpe
+    console.print(
+        f"  [bold]Δ      : CAGR {delta_cagr:+.2%}  Sharpe {delta_sharpe:+.2f}[/bold]"
+    )
+    console.print(
+        "\n[dim]Note: fundamentals are not point-in-time; both legs share that "
+        "look-ahead, so the delta is informative but the absolute numbers are inflated.[/dim]"
+    )
+
+
 @cli.command(name="risk-report")
 @click.pass_context
 def risk_report(ctx: click.Context) -> None:

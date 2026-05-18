@@ -288,9 +288,15 @@ def _score_panel(cfg, watchlist_tickers: list[str]) -> None:
     s3.metric("Sub-score", f"{b.sentiment_subscore:+.3f}", help="net × confidence — what feeds the blend")
 
     st.subheader("Final blend")
+    factor_status = (
+        f"factor weight **{b.factor_weight:.2f}**"
+        if b.factor_composite is not None
+        else "factor leg **skipped** (universe below `factors.min_universe`)"
+    )
     st.caption(
-        f"Outer blend weights are configurable. Current sentiment weight: "
-        f"**{b.sentiment_weight:.2f}** (set in `config.yaml` → `strategy.sentiment_weight`)."
+        f"Three-way blend: sentiment weight **{b.sentiment_weight:.2f}**, "
+        f"{factor_status}, technical absorbs the remainder. "
+        f"Configured in `config.yaml` → `strategy.sentiment_weight` / `strategy.factor_weight`."
     )
     blend_df = pd.DataFrame([
         {
@@ -343,19 +349,28 @@ def _score_panel(cfg, watchlist_tickers: list[str]) -> None:
             })
         st.dataframe(pd.DataFrame(ms_rows), use_container_width=True, hide_index=True)
 
-    if b.factor_scores:
-        st.subheader("Factor model breakdown (parallel signal)")
+    if b.factor_scores or b.factor_composite is not None:
+        st.subheader("Factor model breakdown")
         st.caption(
-            "Six classical factors scored from fundamentals and price history. "
-            "Not currently fused into the dashboard score — runs alongside as a "
-            "sanity check."
+            "Six classical factors scored cross-sectionally against the configured "
+            "peer pool. The composite below is the same number that feeds the live "
+            "blend — when present, this is no longer a parallel signal."
         )
-        fact_df = pd.DataFrame([
-            {"Factor": k, "Score": round(v, 3)} for k, v in b.factor_scores.items()
-        ])
-        st.dataframe(fact_df, use_container_width=True, hide_index=True)
+        fc1, fc2 = st.columns(2)
         if b.factor_composite is not None:
-            st.metric("Factor composite", f"{b.factor_composite:+.3f}")
+            fc1.metric("Factor composite", f"{b.factor_composite:+.3f}")
+            fc2.metric("Contribution to final", f"{b.factor_contribution:+.3f}",
+                       help=f"factor_weight {b.factor_weight:.2f} × composite")
+        else:
+            fc1.info(
+                "Per-factor z-scores below, but no composite — peer universe "
+                "is below `factors.min_universe`."
+            )
+        if b.factor_scores:
+            fact_df = pd.DataFrame([
+                {"Factor": k, "Score": round(v, 3)} for k, v in b.factor_scores.items()
+            ])
+            st.dataframe(fact_df, use_container_width=True, hide_index=True)
 
     if b.reasons:
         st.subheader("Plain-English reasons")

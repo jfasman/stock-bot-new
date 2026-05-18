@@ -142,3 +142,44 @@ def test_matched_setups_field_defaults_to_empty_list(cfg):
         b = explain_score(cfg, "TEST", include_factors=False)
     assert b is not None
     assert b.matched_setups == []
+
+
+# -- roadmap §13.6 factor fusion --------------------------------------------
+
+def test_explain_score_surfaces_factor_fields_when_fusion_fires(cfg):
+    """When compute_factor_composites returns a value, the breakdown carries
+    it as a first-class field, the blended_components list shows three rows,
+    and the formula text includes a factor term."""
+    df = _synthetic_history(seed=5)
+    with patch("stockbot.strategy.score_explain.price_data.get_history", return_value=df), \
+         patch("stockbot.strategy.score_explain.aggregate", return_value={}), \
+         patch("stockbot.strategy.score_explain.compute_factor_composites",
+               return_value={"FUSE": 0.42}):
+        b = explain_score(cfg, "FUSE", include_factors=False)
+    assert b is not None
+    assert b.factor_composite == 0.42
+    assert b.factor_weight == 0.30  # config default
+    assert abs(b.factor_contribution - 0.30 * 0.42) < 1e-9
+    # Three rows in the outer blend: tech / sentiment / factor.
+    assert len(b.blended_components) == 3
+    names = [c.name for c in b.blended_components]
+    assert "factor block" in names
+    assert "factor_composite" in b.formula()
+
+
+def test_explain_score_factor_fields_default_when_universe_too_small(cfg):
+    """No factor composite returned (e.g. min_universe gate) → factor leg is
+    inert: composite=None, contribution=0, blend renormalizes to two-way."""
+    df = _synthetic_history(seed=5)
+    with patch("stockbot.strategy.score_explain.price_data.get_history", return_value=df), \
+         patch("stockbot.strategy.score_explain.aggregate", return_value={}), \
+         patch("stockbot.strategy.score_explain.compute_factor_composites", return_value={}):
+        b = explain_score(cfg, "TINY", include_factors=False)
+    assert b is not None
+    assert b.factor_composite is None
+    assert b.factor_contribution == 0.0
+    # Factor block present in the list but with weight=0 (so the dashboard can
+    # render a consistent three-row table; the row is just inert).
+    factor_row = next(c for c in b.blended_components if c.name == "factor block")
+    assert factor_row.weight == 0.0
+    assert factor_row.contribution == 0.0

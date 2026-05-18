@@ -24,10 +24,21 @@ class Trade:
     direction: str
     pnl: float
     fees: float
+    setup_name: Optional[str] = None  # populated when Backtester is given a match_fn
 
     @property
     def closed(self) -> bool:
         return self.exit_date is not None
+
+    @property
+    def return_pct(self) -> float:
+        """Trade return as a fraction of entry notional. Used by the
+        setup_performance aggregator as the per-trade R proxy.
+        """
+        notional = self.entry_price * self.quantity
+        if notional <= 0:
+            return 0.0
+        return self.pnl / notional
 
 
 @dataclass
@@ -50,6 +61,11 @@ class BacktestResult:
 # discipline: the signal only sees data available as of `asof`.
 SignalFn = Callable[[date, Dict[str, pd.DataFrame]], Dict[str, float]]
 
+# A MatchFn returns the setup name (or None) that fits a ticker's
+# point-in-time tech state at entry. Optional; populates Trade.setup_name
+# for the setup_performance aggregator.
+MatchFn = Callable[[str, pd.DataFrame], Optional[str]]
+
 
 class Backtester:
     """Event-driven daily backtester with point-in-time data slicing and costs.
@@ -69,12 +85,14 @@ class Backtester:
         cost_model: Optional[CostModel] = None,
         max_position_weight: float = 0.10,
         rebalance_freq: int = 5,
+        match_fn: Optional[MatchFn] = None,
     ):
         self.history = {t.upper(): self._normalize_index(df) for t, df in price_history.items()}
         self.starting_cash = starting_cash
         self.costs = cost_model or default_equity_costs()
         self.max_position_weight = max_position_weight
         self.rebalance_freq = max(1, rebalance_freq)
+        self.match_fn = match_fn
 
     @staticmethod
     def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -225,6 +243,7 @@ class Backtester:
                         direction=current["direction"],
                         pnl=pnl,
                         fees=fee,
+                        setup_name=current.get("setup_name"),
                     ))
                     new_qty = current["quantity"] - qty_closing
                     if new_qty <= 0:
@@ -234,11 +253,19 @@ class Backtester:
                 else:
                     positions[t]["quantity"] = current["quantity"] + abs(delta)
             else:
+                setup_name: Optional[str] = None
+                if self.match_fn is not None:
+                    try:
+                        sliced = self.history[t].loc[:day]
+                        setup_name = self.match_fn(t, sliced)
+                    except Exception as exc:
+                        log.warning("match_fn raised for %s on %s: %s", t, day, exc)
                 positions[t] = {
                     "quantity": abs(target_qty),
                     "direction": "long" if weight > 0 else "short",
                     "entry_price": px,
                     "entry_date": str(day.date()),
+                    "setup_name": setup_name,
                 }
         return cash, positions, trades
 
@@ -259,4 +286,5 @@ class Backtester:
             direction=pos["direction"],
             pnl=pnl,
             fees=fee,
+            setup_name=pos.get("setup_name"),
         )

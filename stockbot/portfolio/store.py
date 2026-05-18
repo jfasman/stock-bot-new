@@ -126,6 +126,17 @@ CREATE TABLE IF NOT EXISTS conviction_log (
 
 CREATE INDEX IF NOT EXISTS idx_conviction_log_ticker_ts
     ON conviction_log(ticker, ts DESC);
+
+CREATE TABLE IF NOT EXISTS setup_performance (
+    setup_name TEXT PRIMARY KEY,            -- one row per setup; upsert on regen
+    direction TEXT NOT NULL,                -- 'long' | 'short'
+    n_trades INTEGER NOT NULL,
+    win_rate REAL NOT NULL,                 -- 0..1
+    avg_r REAL NOT NULL,                    -- average R per trade
+    expectancy REAL NOT NULL,               -- win_rate × avg_win - (1-win_rate) × avg_loss
+    sharpe REAL NOT NULL,                   -- annualized Sharpe of trade returns
+    last_validated_at TEXT NOT NULL         -- ISO datetime of the run that produced these stats
+);
 """
 
 

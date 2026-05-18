@@ -158,3 +158,90 @@ def test_build_context_feeds_a_passing_evaluation_end_to_end():
     pick, verdicts = evaluate(_idea(score=0.80), ctx)
     assert pick is not None
     assert all(v.passed for v in verdicts.values())
+
+
+def test_build_context_runs_matcher_when_tech_supplied_and_perf_exists():
+    """When tech is supplied AND setup_performance has a row for the
+    matched setup, the assembler derives MatchedSetup automatically."""
+    from stockbot.ops.setup_performance import SetupPerformance, upsert_performance
+    from stockbot.strategy.scorer import TechnicalRead
+
+    # Tech reads as a breakout: last > 20d high, RSI ≥ 60, MACD > 0, volume spike.
+    tech = TechnicalRead(
+        trend=0.8, momentum=0.6, breakout=0.7, volume_ok=True,
+        rsi=65.0, last=101.0,
+        sma20=98.0, sma50=95.0, atr14=2.0,
+        high_20d=99.0, volume_last=1_500_000, volume_20d_avg=800_000,
+        macd_hist_last=0.3,
+    )
+    upsert_performance(SetupPerformance(
+        setup_name="breakout_with_momentum", direction="long",
+        n_trades=40, win_rate=0.55, avg_r=0.4, expectancy=0.25,
+        sharpe=1.2, last_validated_at=datetime(2026, 5, 1),
+    ))
+    ctx = build_context(
+        _cfg(), _idea(),
+        now=datetime(2026, 5, 17), macro=_raw_macro(),
+        tech=tech,
+    )
+    assert ctx.matched_setup is not None
+    assert ctx.matched_setup.name == "breakout_with_momentum"
+    assert ctx.matched_setup.n_trades == 40
+    assert ctx.matched_setup.expectancy == 0.25
+
+
+def test_build_context_matched_setup_is_zero_row_when_no_perf():
+    """Matched but no walk-forward data → MatchedSetup with n_trades=0,
+    so setup_validated gate fails closed on insufficient sample."""
+    from stockbot.strategy.scorer import TechnicalRead
+
+    tech = TechnicalRead(
+        trend=0.8, momentum=0.6, breakout=0.7, volume_ok=True,
+        rsi=65.0, last=101.0,
+        sma20=98.0, sma50=95.0, atr14=2.0,
+        high_20d=99.0, volume_last=1_500_000, volume_20d_avg=800_000,
+        macd_hist_last=0.3,
+    )
+    ctx = build_context(
+        _cfg(), _idea(),
+        now=datetime(2026, 5, 17), macro=_raw_macro(),
+        tech=tech,
+    )
+    assert ctx.matched_setup is not None
+    assert ctx.matched_setup.name == "breakout_with_momentum"
+    assert ctx.matched_setup.n_trades == 0
+
+
+def test_build_context_no_tech_keeps_matched_setup_none():
+    """Without tech, matcher can't run; matched_setup stays None and
+    setup_validated fails closed via 'no matched setup'."""
+    ctx = build_context(
+        _cfg(), _idea(),
+        now=datetime(2026, 5, 17), macro=_raw_macro(),
+        # tech=None (default)
+    )
+    assert ctx.matched_setup is None
+
+
+def test_build_context_explicit_matched_setup_bypasses_matcher():
+    """Explicit matched_setup arg wins over matcher (test/fixture path)."""
+    from stockbot.strategy.scorer import TechnicalRead
+
+    tech = TechnicalRead(
+        trend=0.8, momentum=0.6, breakout=0.7, volume_ok=True,
+        rsi=65.0, last=101.0,
+        sma20=98.0, sma50=95.0, atr14=2.0,
+        high_20d=99.0, volume_last=1_500_000, volume_20d_avg=800_000,
+        macd_hist_last=0.3,
+    )
+    forced = MatchedSetup(
+        name="manually_specified", direction="long",
+        n_trades=99, expectancy=0.99,
+        last_validated_at=datetime(2026, 5, 1),
+    )
+    ctx = build_context(
+        _cfg(), _idea(),
+        now=datetime(2026, 5, 17), macro=_raw_macro(),
+        tech=tech, matched_setup=forced,
+    )
+    assert ctx.matched_setup is forced

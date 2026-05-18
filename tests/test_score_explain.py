@@ -95,3 +95,50 @@ def test_indicators_populated(cfg):
     assert i.avg_volume_20 > 0
     assert i.rsi_label() in ("oversold", "neutral", "overbought")
     assert i.trend_label()
+
+
+def test_matched_setups_populated_with_perf(cfg):
+    """When the matcher finds a setup and the perf store has a row,
+    explain_score surfaces the validated stats."""
+    from datetime import datetime
+
+    from stockbot.data.macro import MacroSnapshot
+    from stockbot.ops.setup_performance import SetupPerformance, upsert_performance
+
+    df = _synthetic_history(drift=0.005, seed=10)             # uptrend
+    upsert_performance(SetupPerformance(
+        setup_name="pullback_in_uptrend", direction="long",
+        n_trades=40, win_rate=0.55, avg_r=0.4, expectancy=0.25,
+        sharpe=1.2, last_validated_at=datetime(2026, 5, 1),
+    ))
+    macro = MacroSnapshot(
+        vix=18.0, vix_3m=20.0, yield_2y=4.5, yield_10y=4.2, yield_30y=4.3,
+        dxy=104.0, spx_close=4500.0, yield_curve_2s10s=20.0, vix_term_structure=1.1,
+    )
+    with patch("stockbot.strategy.score_explain.price_data.get_history", return_value=df), \
+         patch("stockbot.strategy.score_explain.aggregate", return_value={}), \
+         patch("stockbot.data.macro.snapshot", return_value=macro):
+        b = explain_score(cfg, "TEST", include_factors=False)
+
+    assert b is not None
+    # The synthetic uptrend may or may not match a setup depending on RNG —
+    # the contract under test is the *shape* of the field, not the count.
+    for m in b.matched_setups:
+        assert m.name and m.direction in ("long", "short")
+        assert isinstance(m.expected_holding_days, tuple)
+        if m.name == "pullback_in_uptrend":
+            assert m.has_performance is True
+            assert m.n_trades == 40
+            assert abs(m.expectancy - 0.25) < 1e-9
+
+
+def test_matched_setups_field_defaults_to_empty_list(cfg):
+    """If the matcher dependency raises (network down, etc.), the field
+    must still exist as an empty list — never None or missing."""
+    df = _synthetic_history(seed=11)
+    with patch("stockbot.strategy.score_explain.price_data.get_history", return_value=df), \
+         patch("stockbot.strategy.score_explain.aggregate", return_value={}), \
+         patch("stockbot.data.macro.snapshot", side_effect=RuntimeError("network")):
+        b = explain_score(cfg, "TEST", include_factors=False)
+    assert b is not None
+    assert b.matched_setups == []

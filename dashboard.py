@@ -454,6 +454,86 @@ def _conviction_panel() -> None:
             st.code(json.dumps(json.loads(drill["pick_json"]), indent=2), language="json")
 
 
+def _notifications_panel() -> None:
+    """Fired-notification audit with ack + snooze controls. Spec: roadmap §13.3."""
+    import json
+
+    from stockbot.ops.notification_log import ack, recent, snooze
+
+    st.caption(
+        "Every dispatch attempt from `paper watch` lands here. Ack to clear; "
+        "snooze to suppress the ticker for N hours unless the score moves by "
+        "more than `notifications.resurface_score_delta`."
+    )
+
+    rows = recent(limit=100)
+    if not rows:
+        st.info(
+            "No notifications yet. Run `stockbot paper watch --once` after the "
+            "conviction gate passes an idea to dispatch one."
+        )
+        return
+
+    table_rows = []
+    for r in rows:
+        backends = json.loads(r["backend_results_json"])
+        status = "delivered" if r["delivered_ok"] else "failed"
+        if r["acked_at"]:
+            status = "acked"
+        elif r["snoozed_until"]:
+            status = "snoozed"
+        table_rows.append({
+            "id": r["id"],
+            "ts": r["ts"][:19],
+            "ticker": r["ticker"],
+            "score": round(r["score"], 3),
+            "status": status,
+            "backends": ", ".join(f"{k}={'✓' if v else '✗'}" for k, v in backends.items()),
+            "acked": (r["acked_at"] or "")[:19],
+            "snoozed until": (r["snoozed_until"] or "")[:19],
+        })
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+    # Drill: pick a row, ack or snooze it.
+    st.markdown("##### Manage")
+    row_ids = [r["id"] for r in rows]
+    chosen = st.selectbox(
+        "Pick a notification",
+        row_ids,
+        format_func=lambda i: f"#{i} · {next(r for r in rows if r['id'] == i)['ticker']}",
+        key="notif_select",
+    )
+    drill = next(r for r in rows if r["id"] == chosen)
+
+    col_info, col_ack, col_snooze = st.columns([2, 1, 2])
+    with col_info:
+        st.markdown(
+            f"**{drill['ticker']}** · score {drill['score']:+.3f}  \n"
+            f"sent {drill['ts'][:19]}  \n"
+            f"acked: {drill['acked_at'] or '—'}  \n"
+            f"snoozed until: {drill['snoozed_until'] or '—'}"
+        )
+    with col_ack:
+        if st.button("Ack", key=f"ack_{chosen}", use_container_width=True,
+                     disabled=bool(drill["acked_at"])):
+            if ack(chosen):
+                st.success(f"Acked #{chosen}")
+                st.rerun()
+    with col_snooze:
+        snooze_hours = st.number_input(
+            "Hours", min_value=1.0, max_value=168.0, value=12.0, step=1.0,
+            key=f"snooze_h_{chosen}", label_visibility="collapsed",
+        )
+        if st.button("Snooze", key=f"snooze_{chosen}", use_container_width=True):
+            if snooze(chosen, hours=float(snooze_hours)):
+                st.success(f"Snoozed #{chosen} for {snooze_hours:g}h")
+                st.rerun()
+
+    pick_payload = json.loads(drill["conviction_pick_json"])
+    with st.expander("Pick payload"):
+        st.code(json.dumps(pick_payload, indent=2), language="json")
+
+
 def _leveraged_etf_panel() -> None:
     from stockbot.strategy import leveraged_etfs as letfs
 
@@ -799,9 +879,13 @@ def main() -> None:
             _leveraged_etf_panel()
 
     with tab_conviction:
-        sub_gate, sub_recs = st.tabs(["Gate & setup performance", "Recommendation log"])
+        sub_gate, sub_notifs, sub_recs = st.tabs([
+            "Gate & setup performance", "Notifications", "Recommendation log",
+        ])
         with sub_gate:
             _conviction_panel()
+        with sub_notifs:
+            _notifications_panel()
         with sub_recs:
             df, rate = _recommendations_df(limit=100)
             if df.empty:

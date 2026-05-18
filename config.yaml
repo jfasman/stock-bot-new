@@ -82,6 +82,14 @@ compliance:
   enforce_pdt_check: true
   track_wash_sales: true
 
+notifications:                       # roadmap §13.3 — alert dispatch + audit
+  backend: [stdout, file]            # active notifiers; pushover/slack/email land later
+  max_per_day: 5                     # hard cap across all tickers
+  max_per_ticker_per_week: 2         # prevents the same name from spamming
+  resurface_score_delta: 0.10        # snoozed pick re-fires only if |score - snooze_score| ≥ this
+  market_hours_only: true            # skip dispatch outside NYSE 09:30-16:00 ET on weekdays
+  cadence_minutes: 15                # watch loop sleep between passes
+
 conviction:                          # second-layer alert gate; roadmap §13.1
   notify_threshold: 0.70             # |score| floor for alerting; mirrors strategy.min_score_to_trade (0.55)
   cooldown_hours: 24                 # no re-alert for the same ticker within this window

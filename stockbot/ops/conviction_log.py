@@ -60,12 +60,18 @@ def log_evaluation(
 
 
 def last_notified_at(ticker: str) -> Optional[datetime]:
-    """Most recent timestamp at which the gate passed for this ticker.
+    """Most recent successful notification dispatch for this ticker.
 
-    Cluster 1 proxy for "last notification": the notifications table
-    doesn't exist until Cluster 3, so we use the gate-pass row as the
-    cooldown anchor. Swap to `notifications.ts` when that table lands.
+    Reads from the `notifications` table (Cluster 3). Falls back to
+    "gate passed" rows in `conviction_log` only if `notifications`
+    has no row at all for this ticker — preserves the Cluster-1-only
+    cooldown behavior for setups that haven't run a full watch
+    cycle yet.
     """
+    from . import notification_log
+    ts = notification_log.last_dispatch_at(ticker)
+    if ts is not None:
+        return ts
     init_db()
     with connect() as db:
         row = db.execute(

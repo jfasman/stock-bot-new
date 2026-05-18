@@ -1,0 +1,17 @@
+# Dashboard theme — institutional / light. Restrained palette; green and red
+# are reserved for P&L direction so they keep meaning. See docs/PROJECT_CONTEXT.md
+# for the design rationale.
+
+[theme]
+base = "light"
+primaryColor = "#1F4E79"               # deep institutional blue — accents, focused buttons
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6F8"   # cards / tab content backdrop
+textColor = "#0F172A"                  # near-black, slightly cool
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+runOnSave = true

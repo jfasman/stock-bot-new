@@ -50,6 +50,10 @@ class Config:
     def rebalance(self) -> Dict[str, Any]:
         return self.raw.get("rebalance", {})
 
+    @property
+    def brokers(self) -> Dict[str, Any]:
+        return self.raw.get("brokers", {})
+
 
 def load_config(path: str | Path | None = None) -> Config:
     """Load config.yaml from the project root (or supplied path) and .env credentials."""

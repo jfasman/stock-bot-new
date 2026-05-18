@@ -153,6 +153,46 @@ def paper_convict(ctx: click.Context, watchlist: str | None) -> None:
                   f"Audit rows persisted to conviction_log.")
 
 
+@paper_cmd.command("convict-log")
+@click.option("--limit", "-n", type=int, default=20, show_default=True,
+              help="How many rows to show.")
+@click.option("--ticker", "-t", help="Filter to one ticker.")
+@click.pass_context
+def paper_convict_log(ctx: click.Context, limit: int, ticker: str | None) -> None:
+    """Show the most recent conviction_log rows (roadmap §13.1)."""
+    from rich.table import Table
+
+    from .ops.conviction_log import recent
+
+    rows = recent(limit=limit * 4 if ticker else limit)
+    if ticker:
+        rows = [r for r in rows if r["ticker"] == ticker.upper()][:limit]
+    if not rows:
+        console.print("[yellow]No conviction_log rows yet. Run `paper convict` first.[/yellow]")
+        return
+
+    table = Table(title="conviction_log (newest first)")
+    table.add_column("id", justify="right", style="dim")
+    table.add_column("ts", style="dim")
+    table.add_column("ticker")
+    table.add_column("score", justify="right")
+    table.add_column("verdict")
+    table.add_column("gates s|f|r|v|c|d")  # score | factor | regime | setup_validated | cooldown | data_quality
+
+    for r in rows:
+        verdict = "[green]PASS[/green]" if r["overall_passed"] else "[red]FAIL[/red]"
+        flags = "".join(
+            "[green]✓[/green]" if r[f"{name}_passed"] else "[red]✗[/red]"
+            for name in ("score", "factor_agreement", "regime",
+                        "setup_validated", "cooldown", "data_quality")
+        )
+        table.add_row(
+            str(r["id"]), r["ts"][:19], r["ticker"],
+            f"{r['score']:+.2f}", verdict, flags,
+        )
+    console.print(table)
+
+
 @cli.command()
 @click.option("--show-closed/--no-show-closed", default=True)
 @click.pass_context

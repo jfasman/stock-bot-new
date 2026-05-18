@@ -37,6 +37,23 @@ class ComponentContribution:
 
 
 @dataclass
+class MatchedSetupInfo:
+    """One row in the "matched setups" panel — every setup the ticker
+    currently fits, with its walk-forward expectancy when available.
+    Spec: roadmap §13.2 "Connection to score_explain".
+    """
+    name: str
+    direction: str
+    instrument_hint: str
+    expected_holding_days: tuple[int, int]
+    has_performance: bool                   # True iff a setup_performance row exists
+    n_trades: int = 0
+    expectancy: float = 0.0
+    win_rate: float = 0.0
+    last_validated_at: Optional[str] = None  # ISO string for JSON/dashboard convenience
+
+
+@dataclass
 class IndicatorReadings:
     rsi_14: float
     macd_hist_last: float
@@ -86,6 +103,7 @@ class ScoreBreakdown:
     reasons: List[str] = field(default_factory=list)
     thresholds: Dict[str, float] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    matched_setups: List["MatchedSetupInfo"] = field(default_factory=list)
 
     def formula(self) -> str:
         """Plain-English statement of the math used to produce final_score."""
@@ -179,6 +197,31 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
     if sent_conf < 0.2:
         warnings.append("Sentiment confidence is low; final score is essentially technical-only.")
 
+    # Matched setups (roadmap §13.2). Pure read: matcher over already-fetched
+    # tech/fundamentals/macro plus a perf-store lookup per match.
+    matched_setups: List[MatchedSetupInfo] = []
+    try:
+        from ..data import macro as macro_data
+        from ..data.fundamentals import get_fundamentals as _gf
+        from ..ops.setup_performance import get_performance
+        from .setups.matcher import match as match_setups
+        fund = _gf(ticker)
+        macro_snap = macro_data.snapshot()
+        for s in match_setups(tech, fund, None, macro_snap):
+            perf = get_performance(s.name)
+            matched_setups.append(MatchedSetupInfo(
+                name=s.name, direction=s.direction,
+                instrument_hint=s.instrument_hint,
+                expected_holding_days=s.expected_holding_days(),
+                has_performance=perf is not None,
+                n_trades=perf.n_trades if perf else 0,
+                expectancy=perf.expectancy if perf else 0.0,
+                win_rate=perf.win_rate if perf else 0.0,
+                last_validated_at=perf.last_validated_at.isoformat() if perf else None,
+            ))
+    except Exception as exc:
+        log.info("Setup matching unavailable for %s: %s", ticker, exc)
+
     factor_scores: Optional[Dict[str, float]] = None
     factor_composite: Optional[float] = None
     if include_factors:
@@ -216,4 +259,5 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
         reasons=reasons,
         thresholds={"min_long": min_long, "min_short": min_short},
         warnings=warnings,
+        matched_setups=matched_setups,
     )

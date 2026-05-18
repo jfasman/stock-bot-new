@@ -233,11 +233,22 @@ def report(ctx: click.Context, show_closed: bool) -> None:
 @click.pass_context
 def backtest(ctx: click.Context, start: str, end: str, watchlist: str | None,
              rebalance_days: int, starting_cash: float) -> None:
-    """Run a walk-forward-ready backtest over the watchlist using the factor model."""
+    """Run a walk-forward-ready backtest over the watchlist using the factor model.
+
+    Records the matched setup at each entry and, on completion, upserts
+    one `setup_performance` row per observed setup. The conviction
+    gate's setup_validated check reads from that table (roadmap §13.2).
+    """
+    from datetime import datetime
+
     from .backtest import Backtester
+    from .backtest.setup_aggregator import aggregate_setup_performance, persist
     from .data import prices as price_data
     from .data.fundamentals import get_fundamentals
+    from .data.macro import MacroSnapshot
     from .strategy.factors import FactorWeights, score_universe
+    from .strategy.scorer import read_technicals
+    from .strategy.setups.matcher import match
 
     cfg = ctx.obj["cfg"]
     tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
@@ -245,7 +256,26 @@ def backtest(ctx: click.Context, start: str, end: str, watchlist: str | None,
     history = {t: price_data.get_history(t, period="5y", interval="1d") for t in tickers}
     fundamentals = {t: get_fundamentals(t) for t in tickers}
 
-    bt = Backtester(history, starting_cash=starting_cash, rebalance_freq=rebalance_days)
+    # Match-at-entry closure. Uses a neutral macro snapshot; a true
+    # point-in-time macro feed is its own (future) data wiring problem.
+    # Returning the first match by registration order is fine here —
+    # we are *generating* perf data, so there's no perf to consult yet.
+    neutral_macro = MacroSnapshot(
+        vix=20.0, vix_3m=20.0, yield_2y=4.0, yield_10y=4.0, yield_30y=4.0,
+        dxy=100.0, spx_close=4500.0, yield_curve_2s10s=0.0, vix_term_structure=1.0,
+    )
+
+    def match_fn(ticker, sliced_df):
+        tech = read_technicals(sliced_df, cfg)
+        if tech is None:
+            return None
+        matches = match(tech, fundamentals.get(ticker), None, neutral_macro)
+        return matches[0].name if matches else None
+
+    bt = Backtester(
+        history, starting_cash=starting_cash, rebalance_freq=rebalance_days,
+        match_fn=match_fn,
+    )
 
     weights = FactorWeights()
 
@@ -263,6 +293,20 @@ def backtest(ctx: click.Context, start: str, end: str, watchlist: str | None,
     result = bt.run(signal_fn, start=start, end=end)
     console.print(f"[bold]{result.metrics.headline()}[/bold]")
     console.print(f"trades: {len(result.trades)} (closed {sum(1 for t in result.trades if t.closed)})")
+
+    # Walk-forward → setup_performance.
+    perf_rows = aggregate_setup_performance(result.trades, as_of=datetime.utcnow())
+    if perf_rows:
+        persist(perf_rows)
+        console.print(f"\n[dim]Upserted {len(perf_rows)} setup_performance rows.[/dim]")
+        for p in sorted(perf_rows, key=lambda r: r.expectancy, reverse=True):
+            console.print(
+                f"  [bold]{p.setup_name:<28}[/bold] n={p.n_trades:<4} "
+                f"win={p.win_rate:.0%} avg_r={p.avg_r:+.3f} "
+                f"E={p.expectancy:+.3f} sharpe={p.sharpe:+.2f}"
+            )
+    else:
+        console.print("[yellow]No trades carried a setup_name; setup_performance untouched.[/yellow]")
 
 
 @cli.command(name="risk-report")

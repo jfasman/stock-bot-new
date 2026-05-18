@@ -107,6 +107,52 @@ def paper_close(ctx, position_id, price):
     console.print(f"[red]Closed #{position_id}[/red] @ {price} — realized {realized:+,.2f}")
 
 
+@paper_cmd.command("convict")
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.pass_context
+def paper_convict(ctx: click.Context, watchlist: str | None) -> None:
+    """Run the conviction gate over current ideas; persist verdicts (roadmap §13.1).
+
+    Cluster 1 behavior: no setup library and no factor fusion yet, so
+    `setup_validated` and `factor_agreement` fail closed for every
+    idea. The audit row in `conviction_log` records why each gate
+    voted the way it did.
+    """
+    from .data import macro as macro_data
+    from .ops.config_snapshot import hash_config, snapshot as snap_config
+    from .ops.conviction_log import log_evaluation
+    from .strategy.conviction import evaluate
+    from .strategy.conviction_context import build_context
+
+    cfg = ctx.obj["cfg"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+    console.print(f"[dim]Scanning {len(tickers)} tickers…[/dim]")
+    ideas = generate_ideas(cfg, tickers)
+    if not ideas:
+        console.print("[yellow]No ideas above threshold to gate.[/yellow]")
+        return
+
+    snap_config(cfg)
+    cfg_hash = hash_config(cfg)
+    macro = macro_data.snapshot()
+    console.print(f"[dim]Macro: VIX={macro.vix} curve(2s10s)={macro.yield_curve_2s10s}bps[/dim]")
+
+    n_pass = 0
+    for idea in ideas:
+        gate_ctx = build_context(cfg, idea, macro=macro)
+        pick, verdicts = evaluate(idea, gate_ctx)
+        log_evaluation(idea, verdicts, pick, config_hash=cfg_hash)
+        marker = "[green]PASS[/green]" if pick else "[red]FAIL[/red]"
+        console.print(f"{marker} {idea.ticker:<6} score={idea.score:+.2f}")
+        for name, result in verdicts.items():
+            tick = "[green]✓[/green]" if result.passed else "[red]✗[/red]"
+            console.print(f"   {tick} {name:<18} {result.reason}")
+        if pick:
+            n_pass += 1
+    console.print(f"\n[bold]{n_pass}/{len(ideas)}[/bold] passed all gates. "
+                  f"Audit rows persisted to conviction_log.")
+
+
 @cli.command()
 @click.option("--show-closed/--no-show-closed", default=True)
 @click.pass_context

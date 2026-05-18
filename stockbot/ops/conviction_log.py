@@ -66,6 +66,7 @@ def last_notified_at(ticker: str) -> Optional[datetime]:
     doesn't exist until Cluster 3, so we use the gate-pass row as the
     cooldown anchor. Swap to `notifications.ts` when that table lands.
     """
+    init_db()
     with connect() as db:
         row = db.execute(
             """SELECT ts FROM conviction_log
@@ -77,6 +78,7 @@ def last_notified_at(ticker: str) -> Optional[datetime]:
 
 
 def recent(limit: int = 50) -> list[dict]:
+    init_db()
     with connect() as db:
         rows = db.execute(
             "SELECT * FROM conviction_log ORDER BY id DESC LIMIT ?", (limit,)

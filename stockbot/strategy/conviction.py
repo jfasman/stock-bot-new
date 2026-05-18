@@ -38,9 +38,12 @@ class ConvictionPick:
 
 @dataclass(frozen=True)
 class MacroSnapshot:
+    """Gate-facing macro inputs. Distinct from `data.macro.MacroSnapshot`,
+    which is the broader (Optional-field) raw snapshot — the context
+    assembler maps from that to this.
+    """
     vix: float
     yield_curve_slope_bps: float   # 10y - 2y in bps; negative = inverted
-    dxy_trend: float               # signed pct change over a configured lookback
 
 
 @dataclass(frozen=True)

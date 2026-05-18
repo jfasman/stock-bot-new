@@ -70,7 +70,7 @@ def _make_ctx(**overrides) -> GateContext:
             expectancy=0.25,
             last_validated_at=now - timedelta(days=10),
         ),
-        macro=MacroSnapshot(vix=18.0, yield_curve_slope_bps=25.0, dxy_trend=-0.01),
+        macro=MacroSnapshot(vix=18.0, yield_curve_slope_bps=25.0),
         last_notified_at=None,
         now=now,
         price_age_seconds=60.0,

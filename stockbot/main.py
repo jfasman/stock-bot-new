@@ -172,6 +172,70 @@ def paper_convict(ctx: click.Context, watchlist: str | None) -> None:
                   f"Audit rows persisted to conviction_log.")
 
 
+@paper_cmd.command("watch")
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.option("--once", is_flag=True, help="Run a single pass and exit (good for cron).")
+@click.option("--max-cycles", type=int, default=None,
+              help="Stop after this many cycles (default: run forever).")
+@click.pass_context
+def paper_watch(ctx: click.Context, watchlist: str | None,
+                once: bool, max_cycles: int | None) -> None:
+    """Conviction gate + notification dispatch on a cadence (roadmap §13.3).
+
+    Continuously: scan → gate → notify, sleeping `notifications.cadence_minutes`
+    between cycles. Ctrl-C to exit cleanly. With --once, runs a single pass.
+    """
+    from .ops.scheduler import run_single_pass, run_watch_loop
+
+    cfg = ctx.obj["cfg"]
+    portfolio = ctx.obj["portfolio"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+
+    if once:
+        result = run_single_pass(cfg, portfolio, tickers)
+        console.print(
+            f"[bold]ideas={result.n_ideas}[/bold] · "
+            f"passes={result.n_passes} · "
+            f"[green]dispatched={result.n_dispatched}[/green] · "
+            f"[yellow]suppressed={result.n_suppressed}[/yellow]"
+        )
+        for s in result.suppressions:
+            console.print(f"  [dim]suppressed:[/dim] {s}")
+        return
+
+    console.print("[dim]Press Ctrl-C to exit cleanly.[/dim]")
+    run_watch_loop(cfg, portfolio, tickers, max_cycles=max_cycles)
+
+
+@paper_cmd.command("ack")
+@click.argument("notification_id", type=int)
+@click.pass_context
+def paper_ack(ctx: click.Context, notification_id: int) -> None:
+    """Acknowledge a notification (roadmap §13.3)."""
+    from .ops.notification_log import ack
+    if ack(notification_id):
+        console.print(f"[green]Acked #{notification_id}[/green]")
+    else:
+        console.print(f"[red]No notification with id {notification_id}[/red]")
+
+
+@paper_cmd.command("snooze")
+@click.argument("notification_id", type=int)
+@click.option("--hours", type=float, required=True, help="Snooze duration in hours.")
+@click.pass_context
+def paper_snooze(ctx: click.Context, notification_id: int, hours: float) -> None:
+    """Snooze the notification's ticker for N hours (roadmap §13.3).
+
+    Resurfaces early only if the score moves by more than
+    `notifications.resurface_score_delta` while the snooze is active.
+    """
+    from .ops.notification_log import snooze
+    if snooze(notification_id, hours):
+        console.print(f"[green]Snoozed #{notification_id} for {hours}h[/green]")
+    else:
+        console.print(f"[red]No notification with id {notification_id}[/red]")
+
+
 @paper_cmd.command("convict-log")
 @click.option("--limit", "-n", type=int, default=20, show_default=True,
               help="How many rows to show.")

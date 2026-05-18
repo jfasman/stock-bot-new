@@ -137,6 +137,21 @@ CREATE TABLE IF NOT EXISTS setup_performance (
     sharpe REAL NOT NULL,                   -- annualized Sharpe of trade returns
     last_validated_at TEXT NOT NULL         -- ISO datetime of the run that produced these stats
 );
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,                       -- ISO datetime the notification was attempted
+    ticker TEXT NOT NULL,
+    score REAL NOT NULL,                    -- idea.score at dispatch (for resurface delta)
+    conviction_pick_json TEXT NOT NULL,     -- full pick + payload, for replay
+    backend_results_json TEXT NOT NULL,     -- {backend_name: delivered_ok}
+    delivered_ok INTEGER NOT NULL,          -- 1 iff at least one backend succeeded
+    acked_at TEXT,                          -- NULL until user acknowledges
+    snoozed_until TEXT                      -- NULL unless ticker is on snooze
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_ticker_ts
+    ON notifications(ticker, ts DESC);
 """
 
 

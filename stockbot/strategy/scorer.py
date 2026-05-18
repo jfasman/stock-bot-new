@@ -20,6 +20,15 @@ class TechnicalRead:
     rsi: float
     last: float
     notes: list[str] = field(default_factory=list)
+    # Raw indicators — exposed so the setup library (§13.2) can pattern-match
+    # without re-running indicator math. Default 0.0 keeps old fixtures working.
+    sma20: float = 0.0
+    sma50: float = 0.0
+    atr14: float = 0.0
+    high_20d: float = 0.0
+    volume_last: float = 0.0
+    volume_20d_avg: float = 0.0
+    macd_hist_last: float = 0.0
 
     @property
     def composite(self) -> float:
@@ -38,6 +47,9 @@ def read_technicals(df: pd.DataFrame, cfg: Config) -> Optional[TechnicalRead]:
     rsi14 = ind.rsi(close, 14)
     _, _, macd_hist = ind.macd(close)
     lower_bb, _, upper_bb = ind.bollinger(close, 20, 2.0)
+    # ATR needs High/Low; tolerate dataframes that only carry Close/Volume.
+    atr14 = ind.atr(df, 14) if {"High", "Low"}.issubset(df.columns) else None
+    high_20d = df["High"].rolling(20).max() if "High" in df.columns else close.rolling(20).max()
 
     last = float(close.iloc[-1])
     s20 = float(sma20.iloc[-1])
@@ -95,6 +107,13 @@ def read_technicals(df: pd.DataFrame, cfg: Config) -> Optional[TechnicalRead]:
         rsi=rsi_last,
         last=last,
         notes=notes,
+        sma20=s20,
+        sma50=s50,
+        atr14=float(atr14.iloc[-1]) if atr14 is not None and not np.isnan(atr14.iloc[-1]) else 0.0,
+        high_20d=float(high_20d.iloc[-1]) if not np.isnan(high_20d.iloc[-1]) else 0.0,
+        volume_last=float(volume.iloc[-1]),
+        volume_20d_avg=avg_vol if not np.isnan(avg_vol) else 0.0,
+        macd_hist_last=float(macd_hist.iloc[-1]) if not np.isnan(macd_hist.iloc[-1]) else 0.0,
     )
 
 

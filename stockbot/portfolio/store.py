@@ -152,6 +152,27 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_notifications_ticker_ts
     ON notifications(ticker, ts DESC);
+
+CREATE TABLE IF NOT EXISTS rebalance_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,                       -- ISO datetime proposal was generated
+    algo TEXT NOT NULL,                     -- 'equal_risk_contribution' | 'vol_target_book' | 'mean_variance_with_views'
+    changes_json TEXT NOT NULL,             -- serialized list[WeightChange]
+    raw_turnover REAL NOT NULL,             -- pre-cap turnover
+    capped_turnover REAL NOT NULL,          -- post-cap turnover actually applied
+    feasible INTEGER NOT NULL,              -- 1 iff constraints satisfied
+    notes_json TEXT NOT NULL,               -- list[str] — algo notes / fallback explanations
+    breaches_json TEXT NOT NULL,            -- list[str] — constraint breach reasons
+    status TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'approved' | 'rejected' | 'expired'
+    decided_at TEXT,                        -- NULL until approve/reject
+    decided_by TEXT,                        -- 'user' | 'auto'; reserved for future auto-approve
+    config_hash TEXT                        -- reproducibility per discipline norm #2
+);
+
+CREATE INDEX IF NOT EXISTS idx_rebalance_proposals_ts
+    ON rebalance_proposals(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_rebalance_proposals_status
+    ON rebalance_proposals(status, ts DESC);
 """
 
 

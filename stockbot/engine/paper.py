@@ -234,3 +234,154 @@ def step(cfg: Config, portfolio: Portfolio, tickers: Iterable[str]) -> StepResul
                 notes.append(f"cooldown engaged: day return {day_pct:.2%} <= {threshold:.2%}")
 
     return StepResult(opened=opened, closed=closed, equity=equity_after, notes=notes)
+
+
+# ----------------------------------------------------------------------
+# Book-level rebalance (roadmap §13.8)
+# ----------------------------------------------------------------------
+
+def _annualized_vol(history) -> float:
+    """Annualized realized vol from a daily-close DataFrame. Returns 0 when
+    history is too short, so the caller falls back to the mean-vol default."""
+    if history is None or history.empty or "Close" not in history.columns:
+        return 0.0
+    import numpy as np
+    rets = history["Close"].astype(float).pct_change().dropna()
+    if len(rets) < 20:
+        return 0.0
+    return float(rets.std() * np.sqrt(252))
+
+
+def run_rebalance(
+    cfg: Config,
+    portfolio: Portfolio,
+    tickers: Iterable[str],
+) -> int | None:
+    """Generate a book-level rebalance proposal and record it.
+
+    Returns the proposal row id, or None when the rebalancer is disabled
+    or there is nothing to rebalance over. Persisted proposals are
+    ``status='pending'`` until approved or rejected.
+    """
+    rebalance_cfg = cfg.raw.get("rebalance", {}) if hasattr(cfg, "raw") else {}
+    if not rebalance_cfg.get("enabled", False):
+        log.info("Rebalancer disabled in config — skipping.")
+        return None
+
+    from ..data.fundamentals import get_fundamentals
+    from ..ops import rebalance as ops_rebalance
+    from ..portfolio.constraints import ConstraintConfig
+    from ..portfolio.rebalancer import (
+        BookPosition,
+        CandidatePick,
+        RebalanceConfig,
+        rebalance as run_rebalance_math,
+    )
+
+    # Current book → BookPosition list. Marks come from the same place exits use.
+    open_positions = portfolio.list_open()
+    marks: dict[str, float] = {}
+    for pos in open_positions:
+        m = _mark_price(pos)
+        if m is not None:
+            marks[pos.option_symbol or pos.ticker] = m
+    equity = portfolio.equity(marks) or float(cfg.portfolio.get("starting_cash", 100_000))
+
+    book: List[BookPosition] = []
+    sectors_cache: dict[str, str | None] = {}
+    betas_cache: dict[str, float | None] = {}
+    for pos in open_positions:
+        if pos.instrument != "equity":
+            # Book-level rebalance operates on equity sleeves; options retain
+            # whatever sizing the per-position layer chose.
+            continue
+        mark = marks.get(pos.option_symbol or pos.ticker) or pos.entry_price
+        weight = (pos.market_value(mark) / equity) if equity > 0 else 0.0
+        try:
+            f = get_fundamentals(pos.ticker)
+            sectors_cache[pos.ticker] = f.sector
+            betas_cache[pos.ticker] = f.beta
+        except Exception:
+            pass
+        book.append(BookPosition(
+            ticker=pos.ticker,
+            weight=weight,
+            sector=sectors_cache.get(pos.ticker),
+            beta=betas_cache.get(pos.ticker),
+        ))
+
+    # Candidate picks from the live scorer. We only consider long-equity ideas
+    # for the rebalancer — options sizing stays per-position.
+    ideas = generate_ideas(cfg, tickers)
+    picks: List[CandidatePick] = []
+    seen: set[str] = set()
+    for idea in ideas:
+        if idea.instrument != "equity" or idea.direction != "long":
+            continue
+        if idea.ticker in seen:
+            continue
+        seen.add(idea.ticker)
+        try:
+            f = get_fundamentals(idea.ticker)
+            sectors_cache.setdefault(idea.ticker, f.sector)
+            betas_cache.setdefault(idea.ticker, f.beta)
+        except Exception:
+            pass
+        picks.append(CandidatePick(
+            ticker=idea.ticker,
+            target_weight=0.0,  # algo computes the actual weight
+            sector=sectors_cache.get(idea.ticker),
+            beta=betas_cache.get(idea.ticker),
+        ))
+
+    if not book and not picks:
+        log.info("Rebalancer: nothing in book and no new picks — skipping.")
+        return None
+
+    # Realized vols for the inverse-vol kernel.
+    vols: dict[str, float] = {}
+    for t in {p.ticker for p in book} | {p.ticker for p in picks}:
+        try:
+            hist = price_data.get_history(t, period="1y", interval="1d")
+            v = _annualized_vol(hist)
+            if v > 0:
+                vols[t] = v
+        except Exception as exc:
+            log.info("Vol unavailable for %s: %s", t, exc)
+
+    rebalance_config = RebalanceConfig(
+        algo=str(rebalance_cfg.get("algo", "equal_risk_contribution")),
+        target_vol=float(rebalance_cfg.get("target_vol", 0.15)),
+        max_turnover_per_rebalance=float(rebalance_cfg.get("max_turnover_per_rebalance", 0.20)),
+    )
+
+    # Build constraints from the existing risk_advanced block.
+    risk_adv = cfg.raw.get("risk_advanced", {}) if hasattr(cfg, "raw") else {}
+    beta_range = risk_adv.get("target_beta_range", [-0.20, 1.20])
+    constraints = ConstraintConfig(
+        max_position_pct=float(cfg.portfolio.get("max_position_pct", 0.08)),
+        max_sector_pct=float(risk_adv.get("max_sector_pct", 0.30)),
+        max_gross_exposure=float(risk_adv.get("max_gross_exposure", 1.50)),
+        max_net_exposure=float(risk_adv.get("max_net_exposure", 1.00)),
+        target_beta_range=(float(beta_range[0]), float(beta_range[1])),
+    )
+
+    proposal = run_rebalance_math(
+        book=book, picks=picks, cfg=rebalance_config,
+        vols=vols, constraints=constraints,
+    )
+    config_hash = hash_config(cfg)
+    proposal_id = ops_rebalance.record(proposal, config_hash=config_hash)
+    audit.log_event(
+        "rebalance.proposed",
+        {
+            "proposal_id": proposal_id,
+            "algo": rebalance_config.algo,
+            "grows": [c.ticker for c in proposal.grows],
+            "shrinks": [c.ticker for c in proposal.shrinks],
+            "raw_turnover": proposal.raw_turnover,
+            "capped_turnover": proposal.capped_turnover,
+            "feasible": proposal.feasible,
+        },
+    )
+    return proposal_id

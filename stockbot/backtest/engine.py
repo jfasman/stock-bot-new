@@ -86,6 +86,7 @@ class Backtester:
         max_position_weight: float = 0.10,
         rebalance_freq: int = 5,
         match_fn: Optional[MatchFn] = None,
+        book_rebalancer: Optional[Callable[[Dict[str, float], Dict[str, float]], Dict[str, float]]] = None,
     ):
         self.history = {t.upper(): self._normalize_index(df) for t, df in price_history.items()}
         self.starting_cash = starting_cash
@@ -93,6 +94,10 @@ class Backtester:
         self.max_position_weight = max_position_weight
         self.rebalance_freq = max(1, rebalance_freq)
         self.match_fn = match_fn
+        # book_rebalancer: (current_weights, signal_weights) → adjusted_weights.
+        # When set, runs after signal_fn each rebalance day to transform the
+        # per-position signal weights into a book-level allocation. Roadmap §13.8.
+        self.book_rebalancer = book_rebalancer
 
     @staticmethod
     def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -153,6 +158,17 @@ class Backtester:
                 except Exception as exc:
                     log.warning("signal_fn raised on %s: %s", day, exc)
                     target_weights = {}
+                if self.book_rebalancer is not None and equity > 0:
+                    current_weights = {
+                        t: (1.0 if p["direction"] == "long" else -1.0)
+                        * p["quantity"] * (self._price_on(t, day) or p["entry_price"])
+                        / equity
+                        for t, p in positions.items()
+                    }
+                    try:
+                        target_weights = self.book_rebalancer(current_weights, target_weights)
+                    except Exception as exc:
+                        log.warning("book_rebalancer raised on %s: %s", day, exc)
                 cash, positions, day_trades = self._rebalance(
                     day, target_weights, positions, cash, equity
                 )

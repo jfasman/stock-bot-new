@@ -276,6 +276,115 @@ def paper_convict_log(ctx: click.Context, limit: int, ticker: str | None) -> Non
     console.print(table)
 
 
+@paper_cmd.command("rebalance")
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.pass_context
+def paper_rebalance(ctx: click.Context, watchlist: str | None) -> None:
+    """Fire a book-level rebalance proposal (roadmap §13.8).
+
+    Writes one row to rebalance_proposals as 'pending' and prints its id.
+    Approve with `paper rebalance-approve <id>` or reject with
+    `paper rebalance-reject <id>`. Translating an approved proposal into
+    paper orders is the next user-driven step.
+    """
+    from .engine.paper import run_rebalance
+
+    cfg = ctx.obj["cfg"]
+    portfolio = ctx.obj["portfolio"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+    proposal_id = run_rebalance(cfg, portfolio, tickers)
+    if proposal_id is None:
+        console.print(
+            "[yellow]Rebalancer skipped — either disabled in config "
+            "(`rebalance.enabled: false`) or nothing to rebalance.[/yellow]"
+        )
+        return
+    console.print(f"[green]Proposal #{proposal_id} recorded as pending.[/green]")
+    console.print("[dim]View with `paper rebalance-log`.[/dim]")
+
+
+@paper_cmd.command("rebalance-approve")
+@click.argument("proposal_id", type=int)
+@click.pass_context
+def paper_rebalance_approve(ctx: click.Context, proposal_id: int) -> None:
+    """Approve a pending rebalance proposal."""
+    from .ops import rebalance as ops_rebalance
+
+    if ops_rebalance.approve(proposal_id):
+        console.print(f"[green]Proposal #{proposal_id} approved.[/green]")
+    else:
+        console.print(
+            f"[red]No pending proposal #{proposal_id} — already decided, or unknown id.[/red]"
+        )
+
+
+@paper_cmd.command("rebalance-reject")
+@click.argument("proposal_id", type=int)
+@click.pass_context
+def paper_rebalance_reject(ctx: click.Context, proposal_id: int) -> None:
+    """Reject a pending rebalance proposal."""
+    from .ops import rebalance as ops_rebalance
+
+    if ops_rebalance.reject(proposal_id):
+        console.print(f"[yellow]Proposal #{proposal_id} rejected.[/yellow]")
+    else:
+        console.print(
+            f"[red]No pending proposal #{proposal_id} — already decided, or unknown id.[/red]"
+        )
+
+
+@paper_cmd.command("rebalance-log")
+@click.option("--limit", "-n", type=int, default=20, show_default=True)
+@click.option("--pending-only", is_flag=True, default=False, help="Show only pending proposals.")
+@click.pass_context
+def paper_rebalance_log(ctx: click.Context, limit: int, pending_only: bool) -> None:
+    """Show recent rebalance proposals."""
+    from rich.table import Table
+
+    from .ops import rebalance as ops_rebalance
+
+    rows = ops_rebalance.pending() if pending_only else ops_rebalance.recent(limit=limit)
+    if not rows:
+        console.print(
+            "[yellow]No rebalance proposals yet. "
+            "Enable `rebalance.enabled: true` and run `paper rebalance`.[/yellow]"
+        )
+        return
+
+    table = Table(title="rebalance_proposals")
+    table.add_column("id", justify="right", style="dim")
+    table.add_column("ts", style="dim")
+    table.add_column("algo")
+    table.add_column("status")
+    table.add_column("turnover", justify="right")
+    table.add_column("feasible")
+    table.add_column("grows / shrinks")
+
+    for r in rows:
+        changes = r.get("changes", [])
+        grows = sum(
+            1 for c in changes
+            if abs(c["current_weight"]) < 1e-6 and abs(c["target_weight"]) > 1e-6
+            or c["target_weight"] > c["current_weight"] + 1e-6
+        )
+        shrinks = sum(
+            1 for c in changes
+            if abs(c["target_weight"]) < 1e-6 and abs(c["current_weight"]) > 1e-6
+            or c["target_weight"] < c["current_weight"] - 1e-6
+        )
+        status_style = {
+            "pending": "[yellow]pending[/yellow]",
+            "approved": "[green]approved[/green]",
+            "rejected": "[red]rejected[/red]",
+        }.get(r["status"], r["status"])
+        feas = "[green]✓[/green]" if r["feasible"] else "[red]✗[/red]"
+        table.add_row(
+            str(r["id"]), (r["ts"] or "")[:19], r["algo"], status_style,
+            f"{r['capped_turnover']:.2%}", feas, f"{grows} / {shrinks}",
+        )
+    console.print(table)
+
+
 @cli.command()
 @click.option("--show-closed/--no-show-closed", default=True)
 @click.pass_context

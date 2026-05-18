@@ -126,6 +126,49 @@ class FileNotifier:
             return False
 
 
+@dataclass(frozen=True)
+class PushoverNotifier:
+    """Push notifications via pushover.net. Single HTTP POST per send.
+
+    Credentials come from env vars (never written to disk). Missing
+    creds → send() returns False and the dispatcher records the
+    failure to the audit log; the watch loop keeps going. The
+    construction-time check means a misconfigured deployment shows
+    up in the first cycle's audit row, not as a runtime crash.
+    """
+    name: str = "pushover"
+    user_key_env: str = "PUSHOVER_USER_KEY"
+    api_token_env: str = "PUSHOVER_API_TOKEN"
+    endpoint: str = "https://api.pushover.net/1/messages.json"
+    timeout_seconds: float = 8.0
+
+    def send(self, payload: NotificationPayload) -> bool:
+        import os
+
+        import requests
+
+        user_key = os.environ.get(self.user_key_env)
+        api_token = os.environ.get(self.api_token_env)
+        if not user_key or not api_token:
+            return False
+
+        data = {
+            "token": api_token,
+            "user": user_key,
+            "title": "stockbot · " + payload.headline,
+            "message": payload.body,
+            "priority": 0,                                    # default; 1 = high, 2 = emergency
+        }
+        if payload.deep_link:
+            data["url"] = payload.deep_link
+            data["url_title"] = "Open dashboard"
+        try:
+            resp = requests.post(self.endpoint, data=data, timeout=self.timeout_seconds)
+            return resp.status_code == 200 and resp.json().get("status") == 1
+        except (requests.RequestException, ValueError):
+            return False
+
+
 def build_notifiers(cfg) -> list[Notifier]:
     """Construct the active notifiers from `cfg.notifications.backend`.
 
@@ -140,12 +183,19 @@ def build_notifiers(cfg) -> list[Notifier]:
     if isinstance(backends, str):
         backends = [backends]
 
+    pushover_cfg = section.get("pushover", {}) if isinstance(section, dict) else {}
+
     out: list[Notifier] = []
     for name in backends:
         if name == "stdout":
             out.append(StdoutNotifier())
         elif name == "file":
             out.append(FileNotifier())
+        elif name == "pushover":
+            out.append(PushoverNotifier(
+                user_key_env=pushover_cfg.get("user_key_env", "PUSHOVER_USER_KEY"),
+                api_token_env=pushover_cfg.get("api_token_env", "PUSHOVER_API_TOKEN"),
+            ))
         else:
             log.warning("notifier backend %r is not implemented yet — skipping", name)
     if not out:

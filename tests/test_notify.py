@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 
+from unittest.mock import MagicMock, patch
+
 from stockbot.config import Config
 from stockbot.ops.notify import (
     FileNotifier,
     NotificationPayload,
     Notifier,
+    PushoverNotifier,
     StdoutNotifier,
     build_notifiers,
     dispatch,
@@ -98,16 +101,83 @@ def test_build_notifiers_defaults_to_stdout_when_unconfigured():
 
 
 def test_build_notifiers_skips_unimplemented_backends_with_fallback():
-    cfg = Config(raw={"notifications": {"backend": ["pushover", "slack"]}})
+    cfg = Config(raw={"notifications": {"backend": ["slack", "email"]}})
     notifiers = build_notifiers(cfg)
-    # Both unsupported → fallback ensures at least stdout is present.
+    # Both unsupported in this PR → fallback ensures at least stdout is present.
     assert any(n.name == "stdout" for n in notifiers)
+    assert not any(n.name in ("slack", "email") for n in notifiers)
 
 
 def test_build_notifiers_picks_file_when_configured():
     cfg = Config(raw={"notifications": {"backend": ["file"]}})
     notifiers = build_notifiers(cfg)
     assert any(n.name == "file" for n in notifiers)
+
+
+def test_build_notifiers_constructs_pushover_with_configured_env_vars():
+    cfg = Config(raw={"notifications": {
+        "backend": ["pushover"],
+        "pushover": {"user_key_env": "MY_KEY", "api_token_env": "MY_TOKEN"},
+    }})
+    notifiers = build_notifiers(cfg)
+    pushover = [n for n in notifiers if n.name == "pushover"]
+    assert pushover and pushover[0].user_key_env == "MY_KEY"
+    assert pushover[0].api_token_env == "MY_TOKEN"
+
+
+# ── PushoverNotifier ─────────────────────────────────────────────────────
+def test_pushover_returns_false_when_credentials_missing(monkeypatch):
+    monkeypatch.delenv("PUSHOVER_USER_KEY", raising=False)
+    monkeypatch.delenv("PUSHOVER_API_TOKEN", raising=False)
+    assert PushoverNotifier().send(_payload()) is False
+
+
+def test_pushover_posts_to_endpoint_and_returns_true_on_success(monkeypatch):
+    monkeypatch.setenv("PUSHOVER_USER_KEY", "u-test")
+    monkeypatch.setenv("PUSHOVER_API_TOKEN", "t-test")
+
+    fake_resp = MagicMock(status_code=200)
+    fake_resp.json.return_value = {"status": 1, "request": "abc"}
+    with patch("requests.post", return_value=fake_resp) as mock_post:
+        result = PushoverNotifier().send(_payload())
+
+    assert result is True
+    mock_post.assert_called_once()
+    args, kwargs = mock_post.call_args
+    assert "pushover.net" in args[0]
+    sent = kwargs["data"]
+    assert sent["token"] == "t-test"
+    assert sent["user"] == "u-test"
+    assert "AAPL" in sent["title"]
+    assert sent["url"] == "http://localhost:8501"             # deep_link from _payload()
+
+
+def test_pushover_returns_false_on_http_error(monkeypatch):
+    monkeypatch.setenv("PUSHOVER_USER_KEY", "u")
+    monkeypatch.setenv("PUSHOVER_API_TOKEN", "t")
+    fake_resp = MagicMock(status_code=500)
+    fake_resp.json.return_value = {"status": 0}
+    with patch("requests.post", return_value=fake_resp):
+        assert PushoverNotifier().send(_payload()) is False
+
+
+def test_pushover_returns_false_on_request_exception(monkeypatch):
+    import requests as _req
+
+    monkeypatch.setenv("PUSHOVER_USER_KEY", "u")
+    monkeypatch.setenv("PUSHOVER_API_TOKEN", "t")
+    with patch("requests.post", side_effect=_req.ConnectionError("network down")):
+        assert PushoverNotifier().send(_payload()) is False
+
+
+def test_pushover_handles_pushover_logical_failure(monkeypatch):
+    # HTTP 200 but Pushover's body reports status != 1.
+    monkeypatch.setenv("PUSHOVER_USER_KEY", "u")
+    monkeypatch.setenv("PUSHOVER_API_TOKEN", "t")
+    fake_resp = MagicMock(status_code=200)
+    fake_resp.json.return_value = {"status": 0, "errors": ["bad token"]}
+    with patch("requests.post", return_value=fake_resp):
+        assert PushoverNotifier().send(_payload()) is False
 
 
 def test_payload_from_pick_round_trips_fields():

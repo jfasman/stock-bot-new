@@ -152,6 +152,42 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 CREATE INDEX IF NOT EXISTS idx_notifications_ticker_ts
     ON notifications(ticker, ts DESC);
+
+-- Roadmap §13.7 Phase B plumbing. The schema lands now so the per-order
+-- approval flow is mostly a routing change later; for Cluster 5 the table
+-- is populated only by the (deferred) LiveOrderRouter, never the read-only
+-- broker. Status transitions:
+--   staged → approved → submitted → filled
+--   staged → rejected
+--   any → errored
+CREATE TABLE IF NOT EXISTS pending_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,                       -- ISO datetime the order was staged
+    ticker TEXT NOT NULL,
+    instrument TEXT NOT NULL,               -- 'equity' (Cluster 5 is equity-only)
+    side TEXT NOT NULL,                     -- 'buy' | 'sell'
+    quantity REAL NOT NULL,
+    limit_price REAL,                       -- NULL = market order
+    time_in_force TEXT NOT NULL DEFAULT 'DAY',
+    backend TEXT NOT NULL,                  -- 'alpaca' | 'tradier' | 'ibkr'
+    recommendation_id INTEGER,              -- FK to recommendations.id when staged from a paper rec
+    status TEXT NOT NULL DEFAULT 'staged',  -- staged | approved | rejected | submitted | filled | errored
+    decided_at TEXT,
+    decided_by TEXT,                        -- 'user' | 'auto' (reserved)
+    submitted_at TEXT,
+    broker_order_id TEXT,                   -- broker's id once submitted
+    filled_at TEXT,
+    fill_price REAL,
+    fill_quantity REAL,
+    error_message TEXT,
+    config_hash TEXT,
+    FOREIGN KEY(recommendation_id) REFERENCES recommendations(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_orders_status_ts
+    ON pending_orders(status, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_pending_orders_ticker_ts
+    ON pending_orders(ticker, ts DESC);
 """
 
 

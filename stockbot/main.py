@@ -551,5 +551,201 @@ def explain(ctx: click.Context, ticker: str, no_factors: bool) -> None:
             console.print(f"  ⚠ {w}")
 
 
+# ----------------------------------------------------------------------
+# Live broker (read-only) — roadmap §13.7 Phase A
+# ----------------------------------------------------------------------
+
+@cli.group(name="live")
+def live_cmd() -> None:
+    """Read-only views of the connected real brokerage account.
+
+    Configure `brokers.live_backend` in config.yaml (and the env vars its
+    sub-block references) to wire up a backend. The read-only guarantee is
+    enforced by the type system — these connections cannot place orders.
+    """
+
+
+def _resolve_live_broker(ctx: click.Context):
+    """Build the configured LiveBroker, or print a helpful error and exit."""
+    from .engine.brokers import get_live_broker
+    from .engine.brokers.factory import LiveBrokerNotConfigured
+
+    cfg = ctx.obj["cfg"]
+    try:
+        broker = get_live_broker(cfg, strict=True)
+    except LiveBrokerNotConfigured as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(
+            "[dim]Set `brokers.live_backend` in config.yaml and export the "
+            "credential env vars referenced in its sub-block.[/dim]"
+        )
+        return None
+    return broker
+
+
+@live_cmd.command("status")
+@click.pass_context
+def live_status(ctx: click.Context) -> None:
+    """Show the live brokerage account summary (cash / equity / buying power)."""
+    broker = _resolve_live_broker(ctx)
+    if broker is None:
+        return
+    try:
+        s = broker.account_summary()
+    except Exception as exc:
+        console.print(f"[red]Live broker failed: {exc}[/red]")
+        return
+    console.print(f"[bold]{broker.name.upper()} — account {s.account_id}[/bold]")
+    console.print(f"  Cash         ${s.cash:>14,.2f}")
+    console.print(f"  Buying power ${s.buying_power:>14,.2f}")
+    console.print(f"  Equity       ${s.equity:>14,.2f}")
+    if s.last_equity is not None:
+        delta = s.equity - s.last_equity
+        sign = "[green]+" if delta >= 0 else "[red]"
+        console.print(f"  Δ vs last    {sign}${delta:>14,.2f}[/]")
+    console.print(f"  Currency      {s.currency}")
+    console.print(f"  Status        {s.status}")
+    if s.pdt is not None:
+        console.print(
+            f"  PDT flag      [yellow]YES[/yellow]" if s.pdt
+            else f"  PDT flag      no"
+        )
+
+
+@live_cmd.command("positions")
+@click.pass_context
+def live_positions(ctx: click.Context) -> None:
+    """List positions held at the live broker."""
+    from rich.table import Table
+
+    broker = _resolve_live_broker(ctx)
+    if broker is None:
+        return
+    try:
+        positions = broker.positions()
+    except Exception as exc:
+        console.print(f"[red]Live broker failed: {exc}[/red]")
+        return
+    if not positions:
+        console.print("[yellow]No live positions.[/yellow]")
+        return
+    table = Table(title=f"{broker.name} positions")
+    table.add_column("Ticker")
+    table.add_column("Qty", justify="right")
+    table.add_column("Avg entry", justify="right")
+    table.add_column("Last", justify="right")
+    table.add_column("Mkt value", justify="right")
+    table.add_column("Unrealized", justify="right")
+    table.add_column("%", justify="right")
+    for p in positions:
+        pnl_str = f"{p.unrealized_pnl:+,.2f}" if p.unrealized_pnl is not None else "—"
+        pct_str = f"{p.unrealized_pnl_pct*100:+.2f}%" if p.unrealized_pnl_pct is not None else "—"
+        table.add_row(
+            p.ticker, f"{p.quantity:g}", f"${p.avg_entry_price:,.2f}",
+            f"${p.current_price:,.2f}" if p.current_price is not None else "—",
+            f"${p.market_value:,.2f}" if p.market_value is not None else "—",
+            pnl_str, pct_str,
+        )
+    console.print(table)
+
+
+@live_cmd.command("transactions")
+@click.option("--days", type=int, default=30, show_default=True,
+              help="Look back this many days.")
+@click.pass_context
+def live_transactions(ctx: click.Context, days: int) -> None:
+    """List recent transactions (fills) at the live broker."""
+    from datetime import date, timedelta
+    from rich.table import Table
+
+    broker = _resolve_live_broker(ctx)
+    if broker is None:
+        return
+    since = date.today() - timedelta(days=days)
+    try:
+        txns = broker.transactions(since)
+    except Exception as exc:
+        console.print(f"[red]Live broker failed: {exc}[/red]")
+        return
+    if not txns:
+        console.print(f"[yellow]No transactions since {since.isoformat()}.[/yellow]")
+        return
+    table = Table(title=f"{broker.name} transactions since {since.isoformat()}")
+    table.add_column("Time", style="dim")
+    table.add_column("Ticker")
+    table.add_column("Side")
+    table.add_column("Qty", justify="right")
+    table.add_column("Price", justify="right")
+    table.add_column("Fees", justify="right")
+    for t in sorted(txns, key=lambda x: x.ts, reverse=True):
+        table.add_row(
+            t.ts.isoformat(timespec="minutes"),
+            t.ticker, t.side, f"{t.quantity:g}",
+            f"${t.price:,.2f}", f"${t.fees:,.2f}",
+        )
+    console.print(table)
+
+
+@live_cmd.command("vs-paper")
+@click.pass_context
+def live_vs_paper(ctx: click.Context) -> None:
+    """Side-by-side comparison: paper book vs live brokerage book."""
+    from rich.table import Table
+
+    from .data import prices as price_data
+    from .reporting.live_vs_paper import compare
+
+    broker = _resolve_live_broker(ctx)
+    if broker is None:
+        return
+    portfolio = ctx.obj["portfolio"]
+    paper_positions = portfolio.list_open()
+    try:
+        live_positions_list = broker.positions()
+    except Exception as exc:
+        console.print(f"[red]Live broker failed: {exc}[/red]")
+        return
+
+    # Build current marks for paper positions so unrealized P&L lines up.
+    marks: dict[str, float] = {}
+    for p in paper_positions:
+        if p.instrument != "equity":
+            continue
+        last = price_data.get_last_price(p.ticker)
+        if last is not None:
+            marks[p.ticker] = last
+
+    report = compare(paper_positions, live_positions_list, paper_marks=marks)
+
+    table = Table(title="paper vs live (read-only)")
+    table.add_column("Ticker")
+    table.add_column("In", style="dim")
+    table.add_column("Paper qty", justify="right")
+    table.add_column("Live qty", justify="right")
+    table.add_column("Δ qty", justify="right")
+    table.add_column("Paper P&L", justify="right")
+    table.add_column("Live P&L", justify="right")
+    table.add_column("Δ P&L", justify="right")
+    for r in report.rows:
+        live_pnl = f"{r.live_unrealized_pnl:+,.2f}" if r.live_unrealized_pnl is not None else "—"
+        delta_pnl = f"{r.pnl_delta:+,.2f}" if r.pnl_delta is not None else "—"
+        table.add_row(
+            r.ticker, r.status,
+            f"{r.paper_quantity:g}", f"{r.live_quantity:g}",
+            f"{r.quantity_delta:+g}",
+            f"{r.paper_unrealized_pnl:+,.2f}", live_pnl, delta_pnl,
+        )
+    console.print(table)
+    console.print(
+        f"\n[bold]Paper total unrealized:[/bold] {report.paper_total_unrealized:+,.2f}"
+    )
+    if report.live_total_unrealized is not None:
+        console.print(
+            f"[bold]Live total unrealized:[/bold]  {report.live_total_unrealized:+,.2f}"
+        )
+    for note in report.notes:
+        console.print(f"[dim]→ {note}[/dim]")
+
+
 if __name__ == "__main__":
     cli(obj={})

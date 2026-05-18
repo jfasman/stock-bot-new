@@ -46,6 +46,10 @@ class Config:
     def conviction(self) -> Dict[str, Any]:
         return self.raw.get("conviction", {})
 
+    @property
+    def brokers(self) -> Dict[str, Any]:
+        return self.raw.get("brokers", {})
+
 
 def load_config(path: str | Path | None = None) -> Config:
     """Load config.yaml from the project root (or supplied path) and .env credentials."""

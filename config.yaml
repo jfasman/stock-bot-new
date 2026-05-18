@@ -90,6 +90,22 @@ notifications:                       # roadmap §13.3 — alert dispatch + audit
   market_hours_only: true            # skip dispatch outside NYSE 09:30-16:00 ET on weekdays
   cadence_minutes: 15                # watch loop sleep between passes
 
+brokers:                             # real-broker read-only sync; roadmap §13.7
+  live_backend: null                 # tradier | ibkr | alpaca | null (null = disabled)
+  read_only: true                    # Phase A; Phase B will flip this with opt-in
+  alpaca:
+    access_token_env: ALPACA_API_KEY_ID
+    secret_key_env: ALPACA_SECRET_KEY
+    paper: true                      # paper endpoint by default; flip to live with care
+  tradier:
+    access_token_env: TRADIER_ACCESS_TOKEN
+    account_id_env: TRADIER_ACCOUNT_ID
+    sandbox: true
+  ibkr:
+    account_id_env: IBKR_ACCOUNT_ID
+    base_url: https://localhost:5000 # Client Portal Gateway runs locally
+    verify_ssl: false                # gateway uses self-signed cert by default
+
 conviction:                          # second-layer alert gate; roadmap §13.1
   notify_threshold: 0.70             # |score| floor for alerting; mirrors strategy.min_score_to_trade (0.55)
   cooldown_hours: 24                 # no re-alert for the same ticker within this window

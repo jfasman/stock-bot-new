@@ -454,6 +454,145 @@ def _conviction_panel() -> None:
             st.code(json.dumps(json.loads(drill["pick_json"]), indent=2), language="json")
 
 
+def _live_panel(cfg, portfolio) -> None:
+    """Read-only view of the connected live brokerage account.
+
+    Roadmap §13.7 Phase A — what the live broker reports next to the paper
+    portfolio. No order surface here; this cluster doesn't place trades.
+    """
+    from datetime import date, timedelta
+
+    from stockbot.data import prices as price_data
+    from stockbot.engine.brokers import get_live_broker
+    from stockbot.reporting.live_vs_paper import compare
+
+    backend = cfg.brokers.get("live_backend")
+    if not backend:
+        st.info(
+            "No live broker connected. Set `brokers.live_backend` in `config.yaml` "
+            "(to `alpaca`, `tradier`, or `ibkr`) and export the credential env "
+            "vars referenced under that backend's sub-block."
+        )
+        st.caption(
+            "Phase A is read-only by design — the broker type literally has no "
+            "`place_order` method. Roadmap §13.7."
+        )
+        return
+
+    broker = get_live_broker(cfg)
+    if broker is None:
+        st.warning(
+            f"`brokers.live_backend = {backend}` but the required env vars are "
+            "not set — connection skipped. Check the backend's sub-block in "
+            "`config.yaml` for the env var names."
+        )
+        return
+
+    st.caption(
+        f"Connected to **{broker.name}** (read-only). "
+        "Phase B (per-order approval) is a separate cluster — this view cannot place trades."
+    )
+
+    # --- Account summary -------------------------------------------------
+    try:
+        summary = broker.account_summary()
+    except Exception as exc:
+        st.error(f"`{broker.name}.account_summary()` failed: {exc}")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Cash", f"${summary.cash:,.2f}")
+    c2.metric("Buying power", f"${summary.buying_power:,.2f}")
+    if summary.last_equity is not None:
+        delta = summary.equity - summary.last_equity
+        c3.metric("Equity", f"${summary.equity:,.2f}", f"{delta:+,.2f}")
+    else:
+        c3.metric("Equity", f"${summary.equity:,.2f}")
+    c4.metric("PDT", "yes" if summary.pdt else "no",
+              help="Pattern Day Trader flag from the broker.")
+
+    # --- Live positions ---------------------------------------------------
+    st.subheader("Live positions")
+    try:
+        live_positions = broker.positions()
+    except Exception as exc:
+        st.error(f"`{broker.name}.positions()` failed: {exc}")
+        return
+
+    if not live_positions:
+        st.caption("No live positions.")
+    else:
+        rows = []
+        for p in live_positions:
+            rows.append({
+                "Ticker": p.ticker,
+                "Qty": p.quantity,
+                "Avg entry": round(p.avg_entry_price, 2),
+                "Last": round(p.current_price, 2) if p.current_price is not None else None,
+                "Mkt value": round(p.market_value, 2) if p.market_value is not None else None,
+                "Unrealized $": round(p.unrealized_pnl, 2) if p.unrealized_pnl is not None else None,
+                "%": round(p.unrealized_pnl_pct * 100, 2) if p.unrealized_pnl_pct is not None else None,
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # --- Live vs paper ---------------------------------------------------
+    st.subheader("Paper vs live")
+    paper_positions = portfolio.list_open()
+    marks: dict[str, float] = {}
+    for p in paper_positions:
+        if p.instrument != "equity":
+            continue
+        last = price_data.get_last_price(p.ticker)
+        if last is not None:
+            marks[p.ticker] = last
+    report = compare(paper_positions, live_positions, paper_marks=marks)
+    if not report.rows:
+        st.caption("Both books empty — nothing to compare yet.")
+    else:
+        comp_rows = []
+        for r in report.rows:
+            comp_rows.append({
+                "Ticker": r.ticker,
+                "In": r.status,
+                "Paper qty": r.paper_quantity,
+                "Live qty": r.live_quantity,
+                "Δ qty": r.quantity_delta,
+                "Paper $": round(r.paper_unrealized_pnl, 2),
+                "Live $": round(r.live_unrealized_pnl, 2) if r.live_unrealized_pnl is not None else None,
+                "Δ P&L": round(r.pnl_delta, 2) if r.pnl_delta is not None else None,
+            })
+        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+        m1, m2 = st.columns(2)
+        m1.metric("Paper total unrealized", f"${report.paper_total_unrealized:+,.2f}")
+        if report.live_total_unrealized is not None:
+            m2.metric("Live total unrealized", f"${report.live_total_unrealized:+,.2f}")
+        for note in report.notes:
+            st.info(note)
+
+    # --- Recent transactions ---------------------------------------------
+    st.subheader("Recent transactions (30d)")
+    try:
+        txns = broker.transactions(date.today() - timedelta(days=30))
+    except Exception as exc:
+        st.warning(f"Could not fetch transactions: {exc}")
+        txns = []
+    if not txns:
+        st.caption("No transactions in the last 30 days.")
+    else:
+        tx_rows = []
+        for t in sorted(txns, key=lambda x: x.ts, reverse=True)[:50]:
+            tx_rows.append({
+                "Time": t.ts.isoformat(timespec="minutes"),
+                "Ticker": t.ticker,
+                "Side": t.side,
+                "Qty": t.quantity,
+                "Price": round(t.price, 2),
+                "Fees": round(t.fees, 2),
+            })
+        st.dataframe(pd.DataFrame(tx_rows), use_container_width=True, hide_index=True)
+
+
 def _notifications_panel() -> None:
     """Fired-notification audit with ack + snooze controls. Spec: roadmap §13.3."""
     import json
@@ -804,11 +943,12 @@ def main() -> None:
     _, marks = _open_positions_df(portfolio)
 
     # ── Top-level navigation (4 groups) ────────────────────────────────────
-    tab_today, tab_portfolio, tab_ideas, tab_conviction = st.tabs([
+    tab_today, tab_portfolio, tab_ideas, tab_conviction, tab_live = st.tabs([
         "Today",
         "Portfolio",
         "Ideas",
         "Conviction",
+        "Live (read-only)",
     ])
 
     with tab_today:
@@ -907,6 +1047,9 @@ def main() -> None:
                     "Required by the project's audit policy."
                 )
                 st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with tab_live:
+        _live_panel(cfg, portfolio)
 
 
 if __name__ == "__main__":

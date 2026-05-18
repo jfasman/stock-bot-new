@@ -7,8 +7,10 @@ from typing import Iterable, List, Optional
 from ..config import Config
 from ..data import options as opt_data
 from ..data import prices as price_data
+from ..data.fundamentals import get_fundamentals
 from ..sentiment.aggregator import AggregateSentiment, aggregate
 from . import leveraged_etfs as letfs
+from .factors.fusion import compute_factor_composites
 from .scorer import TechnicalRead, composite_score, read_technicals
 
 log = logging.getLogger(__name__)
@@ -126,6 +128,12 @@ def _build_etf_idea(
 def generate_ideas(cfg: Config, tickers: Iterable[str]) -> List[Idea]:
     tickers = [t.upper() for t in tickers]
     sentiments = aggregate(cfg, tickers)
+    factor_composites = compute_factor_composites(
+        cfg,
+        tickers,
+        fundamentals_loader=get_fundamentals,
+        price_loader=lambda t: price_data.get_history(t, period="6mo", interval="1d"),
+    )
     min_long = float(cfg.strategy.get("min_score_to_trade", 0.55))
     min_short = float(cfg.strategy.get("bear_score_to_trade", -0.55))
 
@@ -144,7 +152,9 @@ def generate_ideas(cfg: Config, tickers: Iterable[str]) -> List[Idea]:
             log.info("Skip %s: not enough price history", t)
             continue
         sentiment = sentiments.get(t)
-        score, reasons = composite_score(cfg, tech, sentiment)
+        score, reasons = composite_score(
+            cfg, tech, sentiment, factor_composite=factor_composites.get(t)
+        )
 
         if score >= min_long:
             ideas.append(

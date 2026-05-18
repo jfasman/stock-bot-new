@@ -121,20 +121,45 @@ def composite_score(
     cfg: Config,
     tech: TechnicalRead,
     sentiment: Optional[AggregateSentiment],
+    *,
+    factor_composite: Optional[float] = None,
 ) -> tuple[float, list[str]]:
-    """Blend technical and sentiment reads into a single signed score in [-1, 1]."""
+    """Blend technical, sentiment, and (optional) factor reads into a signed score in [-1, 1].
+
+    Weight model (roadmap §13.6): sentiment_weight and factor_weight are absolute
+    weights; the technical tier absorbs whatever remains. When a non-tech input is
+    missing (sentiment confidence == 0, or factor_composite is None) its weight
+    reverts to tech — so a watchlist too small to rank cross-sectionally degrades
+    cleanly to the prior two-way blend, and a single-name scan with no sentiment
+    degrades to tech alone.
+    """
     tech_score = tech.composite
     sent_weight = float(cfg.strategy.get("sentiment_weight", 0.4))
-    if sentiment and sentiment.confidence > 0:
-        sent_score = sentiment.net * sentiment.confidence
-        blended = (1 - sent_weight) * tech_score + sent_weight * sent_score
-    else:
-        blended = tech_score
+    factor_weight = float(cfg.strategy.get("factor_weight", 0.30))
+    if sent_weight + factor_weight > 1.0 + 1e-9:
+        raise ValueError(
+            f"sentiment_weight ({sent_weight}) + factor_weight ({factor_weight}) "
+            f"exceeds 1.0 — leaves no room for the technical tier"
+        )
+
+    sent_present = sentiment is not None and sentiment.confidence > 0
+    factor_present = factor_composite is not None
+
+    s_w = sent_weight if sent_present else 0.0
+    f_w = factor_weight if factor_present else 0.0
+    t_w = 1.0 - s_w - f_w
+
+    sent_sub = sentiment.net * sentiment.confidence if sent_present else 0.0
+    factor_sub = float(factor_composite) if factor_present else 0.0
+    blended = t_w * tech_score + s_w * sent_sub + f_w * factor_sub
+
     reasons = list(tech.notes)
-    if sentiment and sentiment.confidence > 0:
+    if sent_present:
         reasons.append(
             f"sentiment {sentiment.net:+.2f} (conf {sentiment.confidence:.2f})"
         )
+    if factor_present:
+        reasons.append(f"factor {factor_sub:+.2f} (weight {factor_weight:.2f})")
     if not tech.volume_ok:
         reasons.append("low liquidity")
     return float(np.clip(blended, -1.0, 1.0)), reasons

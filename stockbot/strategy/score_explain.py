@@ -16,8 +16,10 @@ import pandas as pd
 
 from ..config import Config
 from ..data import prices as price_data
+from ..data.fundamentals import get_fundamentals
 from ..sentiment.aggregator import aggregate
 from . import indicators as ind
+from .factors.fusion import compute_factor_composites
 from .scorer import composite_score, read_technicals
 
 log = logging.getLogger(__name__)
@@ -96,27 +98,43 @@ class ScoreBreakdown:
     sentiment_confidence: float
     sentiment_subscore: float               # net * confidence
     sentiment_weight: float                 # blend weight 0..1
-    blended_components: List[ComponentContribution]  # technical block + sentiment block
+    blended_components: List[ComponentContribution]  # technical block + sentiment block + factor block
     indicators: IndicatorReadings
     factor_scores: Optional[Dict[str, float]] = None   # per-factor when fundamentals available
-    factor_composite: Optional[float] = None
+    factor_composite: Optional[float] = None           # cross-sectional composite (roadmap §13.6)
+    factor_weight: float = 0.0                          # blend weight applied to factor leg
+    factor_contribution: float = 0.0                    # factor_weight × factor_composite
     reasons: List[str] = field(default_factory=list)
     thresholds: Dict[str, float] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     matched_setups: List["MatchedSetupInfo"] = field(default_factory=list)
 
     def formula(self) -> str:
-        """Plain-English statement of the math used to produce final_score."""
-        sw = self.sentiment_weight
-        if self.sentiment_confidence > 0:
+        """Plain-English statement of the math used to produce final_score.
+
+        The string always contains the literal "tech_composite" so callers that
+        grep the formula text have a stable anchor.
+        """
+        sw = self.sentiment_weight if self.sentiment_confidence > 0 else 0.0
+        fw = self.factor_weight if self.factor_composite is not None else 0.0
+        tw = 1.0 - sw - fw
+        if sw == 0 and fw == 0:
             return (
-                f"final = (1 − {sw:.2f}) × tech_composite + {sw:.2f} × (sent_net × sent_conf)\n"
-                f"       = {1-sw:.2f} × {self.tech_composite:+.3f} + {sw:.2f} × {self.sentiment_subscore:+.3f}\n"
-                f"       = {self.final_score:+.3f}"
+                "final = tech_composite (sentiment and factor legs both skipped)\n"
+                f"       = {self.tech_composite:+.3f}"
             )
+        head_terms = [f"{tw:.2f} × tech_composite"]
+        num_terms = [f"{tw:.2f} × {self.tech_composite:+.3f}"]
+        if sw > 0:
+            head_terms.append(f"{sw:.2f} × (sent_net × sent_conf)")
+            num_terms.append(f"{sw:.2f} × {self.sentiment_subscore:+.3f}")
+        if fw > 0:
+            head_terms.append(f"{fw:.2f} × factor_composite")
+            num_terms.append(f"{fw:.2f} × {self.factor_composite:+.3f}")
         return (
-            f"final = tech_composite (sentiment confidence is 0, blend skipped)\n"
-            f"       = {self.tech_composite:+.3f}"
+            "final = " + " + ".join(head_terms) + "\n"
+            "       = " + " + ".join(num_terms) + "\n"
+            f"       = {self.final_score:+.3f}"
         )
 
 
@@ -133,7 +151,16 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
 
     sentiments = aggregate(cfg, [ticker])
     sentiment = sentiments.get(ticker)
-    final, reasons = composite_score(cfg, tech, sentiment)
+    factor_composites = compute_factor_composites(
+        cfg,
+        [ticker],
+        fundamentals_loader=get_fundamentals,
+        price_loader=lambda t: price_data.get_history(t, period="6mo", interval="1d"),
+    )
+    factor_composite_value = factor_composites.get(ticker)
+    final, reasons = composite_score(
+        cfg, tech, sentiment, factor_composite=factor_composite_value
+    )
 
     # Re-derive raw indicators from the same dataframe so the dashboard can show numbers.
     close = df["Close"].astype(float)
@@ -169,18 +196,19 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
     sent_conf = sentiment.confidence if sentiment else 0.0
     sent_sub = sent_net * sent_conf
     sent_w = float(cfg.strategy.get("sentiment_weight", 0.4))
+    factor_w_cfg = float(cfg.strategy.get("factor_weight", 0.30))
 
-    # The outer blend: technical block at (1 - sent_w), sentiment block at sent_w (only if conf > 0).
-    if sent_conf > 0:
-        blended_components = [
-            ComponentContribution("technical block", tech_composite, 1.0 - sent_w, (1.0 - sent_w) * tech_composite),
-            ComponentContribution("sentiment block", sent_sub,        sent_w,       sent_w * sent_sub),
-        ]
-    else:
-        blended_components = [
-            ComponentContribution("technical block", tech_composite, 1.0, tech_composite),
-            ComponentContribution("sentiment block", 0.0,            0.0, 0.0),
-        ]
+    # The outer blend mirrors composite_score: tech absorbs whatever weight the
+    # sentiment or factor leg gives up. See scorer.composite_score for the math.
+    s_w = sent_w if sent_conf > 0 else 0.0
+    f_w = factor_w_cfg if factor_composite_value is not None else 0.0
+    t_w = 1.0 - s_w - f_w
+    factor_sub = float(factor_composite_value) if factor_composite_value is not None else 0.0
+    blended_components = [
+        ComponentContribution("technical block", tech_composite, t_w, t_w * tech_composite),
+        ComponentContribution("sentiment block", sent_sub,        s_w, s_w * sent_sub),
+        ComponentContribution("factor block",    factor_sub,      f_w, f_w * factor_sub),
+    ]
 
     min_long = float(cfg.strategy.get("min_score_to_trade", 0.55))
     min_short = float(cfg.strategy.get("bear_score_to_trade", -0.55))
@@ -222,11 +250,14 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
     except Exception as exc:
         log.info("Setup matching unavailable for %s: %s", ticker, exc)
 
+    # Per-factor breakdown for the dashboard Factor row. The composite that
+    # feeds the blend comes from `compute_factor_composites` above (the
+    # cross-sectional version against the configured peer pool); this single-
+    # ticker call is only used to surface per-factor z-scores when fundamentals
+    # are available.
     factor_scores: Optional[Dict[str, float]] = None
-    factor_composite: Optional[float] = None
     if include_factors:
         try:
-            from ..data.fundamentals import get_fundamentals
             from .factors import FactorWeights, score_universe
             fundamentals = {ticker: get_fundamentals(ticker)}
             report = score_universe(
@@ -237,9 +268,8 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
                 sector_neutral=False,  # single-ticker run can't sector-neutralize
             )
             factor_scores = report.breakdown.get(ticker)
-            factor_composite = report.composite.get(ticker)
         except Exception as exc:
-            log.info("Factor scoring unavailable for %s: %s", ticker, exc)
+            log.info("Factor breakdown unavailable for %s: %s", ticker, exc)
 
     return ScoreBreakdown(
         ticker=ticker,
@@ -255,7 +285,9 @@ def explain_score(cfg: Config, ticker: str, include_factors: bool = True) -> Opt
         blended_components=blended_components,
         indicators=indicators,
         factor_scores=factor_scores,
-        factor_composite=factor_composite,
+        factor_composite=factor_composite_value,
+        factor_weight=factor_w_cfg,
+        factor_contribution=f_w * factor_sub,
         reasons=reasons,
         thresholds={"min_long": min_long, "min_short": min_short},
         warnings=warnings,

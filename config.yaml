@@ -17,7 +17,8 @@ strategy:
   rsi_oversold: 30
   rsi_overbought: 70
   min_avg_volume: 500000
-  sentiment_weight: 0.4         # 0..1 blend between TA and sentiment
+  sentiment_weight: 0.4         # 0..1 blend weight for sentiment leg
+  factor_weight: 0.30           # 0..1 blend weight for factor leg (roadmap §13.6)
   min_score_to_trade: 0.55      # composite score threshold
   bear_score_to_trade: -0.55    # mirror threshold for puts/shorts
 
@@ -48,6 +49,12 @@ factors:
     size: 0.05
     meanrev: 0.15
   sector_neutral: true
+  # Roadmap §13.6: peer pool for cross-sectional ranking. Literal tickers
+  # extend the universe; named tokens like `SPY_constituents` are placeholders
+  # until a constituents file ships. Below min_universe, factor leg falls back
+  # to the two-way blend.
+  min_universe: 12
+  peer_pool: []
 
 backtest:
   starting_cash: 100000

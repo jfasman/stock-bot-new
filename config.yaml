@@ -90,6 +90,13 @@ notifications:                       # roadmap §13.3 — alert dispatch + audit
   market_hours_only: true            # skip dispatch outside NYSE 09:30-16:00 ET on weekdays
   cadence_minutes: 15                # watch loop sleep between passes
 
+rebalance:                           # book-level rebalancer; roadmap §13.8
+  enabled: false                     # default off; explicit opt-in
+  algo: equal_risk_contribution      # equal_risk_contribution | vol_target_book | mean_variance_with_views
+  cadence_days: 5                    # how often the engine fires a proposal
+  target_vol: 0.15                   # used by vol_target_book only
+  max_turnover_per_rebalance: 0.20   # cap on total |Δweight| per proposal
+
 conviction:                          # second-layer alert gate; roadmap §13.1
   notify_threshold: 0.70             # |score| floor for alerting; mirrors strategy.min_score_to_trade (0.55)
   cooldown_hours: 24                 # no re-alert for the same ticker within this window

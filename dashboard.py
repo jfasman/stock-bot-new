@@ -454,6 +454,102 @@ def _conviction_panel() -> None:
             st.code(json.dumps(json.loads(drill["pick_json"]), indent=2), language="json")
 
 
+def _rebalance_panel(cfg) -> None:
+    """Book-level rebalance proposals: list pending, approve / reject. Spec: roadmap §13.8."""
+    from stockbot.ops import rebalance as ops_rebalance
+
+    enabled = bool(cfg.rebalance.get("enabled", False))
+    algo = cfg.rebalance.get("algo", "equal_risk_contribution")
+    cadence = cfg.rebalance.get("cadence_days", 5)
+    max_turnover = cfg.rebalance.get("max_turnover_per_rebalance", 0.20)
+    if not enabled:
+        st.warning(
+            "Rebalancer is **disabled** in config (`rebalance.enabled: false`). "
+            "Set it to `true` and run `paper rebalance` from the CLI to fire a proposal."
+        )
+    else:
+        st.caption(
+            f"Algo **{algo}** · cadence **{cadence}d** · "
+            f"max turnover per rebalance **{max_turnover:.0%}**. "
+            "Proposals below are audit rows; approve to mark intent, reject to discard."
+        )
+
+    rows = ops_rebalance.recent(limit=50)
+    if not rows:
+        st.info("No rebalance proposals yet. Run `paper rebalance` from the CLI.")
+        return
+
+    summary_rows = []
+    for r in rows:
+        changes = r.get("changes", [])
+        grows = sum(
+            1 for c in changes
+            if (abs(c["current_weight"]) < 1e-6 and abs(c["target_weight"]) > 1e-6)
+            or c["target_weight"] > c["current_weight"] + 1e-6
+        )
+        shrinks = sum(
+            1 for c in changes
+            if (abs(c["target_weight"]) < 1e-6 and abs(c["current_weight"]) > 1e-6)
+            or c["target_weight"] < c["current_weight"] - 1e-6
+        )
+        summary_rows.append({
+            "ID": r["id"],
+            "Time": (r["ts"] or "")[:19],
+            "Algo": r["algo"],
+            "Status": r["status"],
+            "Raw turnover": f"{r['raw_turnover']:.2%}",
+            "Capped": f"{r['capped_turnover']:.2%}",
+            "Feasible": "✓" if r["feasible"] else "✗",
+            "Grows": grows,
+            "Shrinks": shrinks,
+        })
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    # Drill-in for pending proposals.
+    pending_ids = [r["id"] for r in rows if r["status"] == "pending"]
+    if not pending_ids:
+        st.caption("No pending proposals.")
+        return
+
+    st.subheader("Pending proposals")
+    selected_id = st.selectbox(
+        "Inspect proposal", options=pending_ids,
+        format_func=lambda i: f"#{i}",
+        key="rebal_pending_select",
+    )
+    proposal = ops_rebalance.get(selected_id)
+    if not proposal:
+        return
+
+    if proposal.get("breaches"):
+        for b in proposal["breaches"]:
+            st.warning(f"⚠ {b}")
+    if proposal.get("notes"):
+        for n in proposal["notes"]:
+            st.info(n)
+
+    changes = proposal.get("changes", [])
+    if changes:
+        change_rows = [
+            {
+                "Ticker": c["ticker"],
+                "Current": f"{c['current_weight']:.2%}",
+                "Target": f"{c['target_weight']:.2%}",
+                "Δ": f"{c['target_weight'] - c['current_weight']:+.2%}",
+            }
+            for c in changes
+        ]
+        st.dataframe(pd.DataFrame(change_rows), use_container_width=True, hide_index=True)
+
+    a, b = st.columns(2)
+    if a.button("Approve", key=f"rebal_approve_{selected_id}", type="primary"):
+        ops_rebalance.approve(selected_id)
+        st.rerun()
+    if b.button("Reject", key=f"rebal_reject_{selected_id}"):
+        ops_rebalance.reject(selected_id)
+        st.rerun()
+
+
 def _notifications_panel() -> None:
     """Fired-notification audit with ack + snooze controls. Spec: roadmap §13.3."""
     import json
@@ -815,8 +911,8 @@ def main() -> None:
         _today_panel(cfg, portfolio, marks, tickers, cycle_result, scan_ideas)
 
     with tab_portfolio:
-        sub_overview, sub_positions, sub_closed, sub_curve, sub_risk, sub_stress = st.tabs([
-            "Overview", "Open positions", "Closed trades", "Equity curve", "Risk", "Stress",
+        sub_overview, sub_positions, sub_closed, sub_curve, sub_risk, sub_stress, sub_rebal = st.tabs([
+            "Overview", "Open positions", "Closed trades", "Equity curve", "Risk", "Stress", "Rebalance",
         ])
         with sub_overview:
             _portfolio_panel(cfg, portfolio, marks)
@@ -844,6 +940,8 @@ def main() -> None:
             _risk_panel(portfolio)
         with sub_stress:
             _stress_panel(portfolio)
+        with sub_rebal:
+            _rebalance_panel(cfg)
 
     with tab_ideas:
         sub_scan, sub_score, sub_letf = st.tabs([

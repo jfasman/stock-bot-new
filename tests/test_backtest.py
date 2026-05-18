@@ -31,6 +31,37 @@ def test_backtester_equal_weight_signal_runs_and_makes_money():
     assert result.metrics.trades > 0
 
 
+def test_backtester_book_rebalancer_hook_transforms_signal():
+    """The book_rebalancer hook gets a chance to rewrite signal weights
+    before the engine applies them. Roadmap §13.8."""
+    tickers = ["A", "B", "C"]
+    hist = _synthetic(tickers, days=300, seed=2)
+
+    calls: list[tuple[dict, dict]] = []
+
+    def passthrough_rebalancer(current_weights: dict, signal_weights: dict) -> dict:
+        calls.append((current_weights, signal_weights))
+        # Halve every signal weight; rest stays cash.
+        return {t: w * 0.5 for t, w in signal_weights.items()}
+
+    bt = Backtester(
+        hist, starting_cash=100_000.0, rebalance_freq=10,
+        book_rebalancer=passthrough_rebalancer,
+    )
+
+    def signal(asof, sliced):
+        return {t: 1.0 / len(tickers) for t in tickers}
+
+    result = bt.run(signal, start="2022-02-01", end="2022-12-30")
+    assert len(calls) > 0  # hook fired at least once
+    # First call should see empty current_weights (no positions yet).
+    assert calls[0][0] == {}
+    # Each call's signal_weights should match what signal() returned.
+    for _, sw in calls:
+        assert all(abs(w - 1 / 3) < 1e-9 for w in sw.values())
+    assert not result.equity_curve.empty
+
+
 def test_backtester_no_signal_holds_cash():
     tickers = ["A"]
     hist = _synthetic(tickers, days=300)

@@ -385,3 +385,228 @@ def run_rebalance(
         },
     )
     return proposal_id
+
+
+# ----------------------------------------------------------------------
+# Execute an approved rebalance proposal (roadmap §13.8)
+# ----------------------------------------------------------------------
+
+@dataclass
+class RebalanceExecution:
+    """What `execute_rebalance` actually did. Surfaces for the CLI/dashboard."""
+    proposal_id: int
+    opened: List[str]
+    closed: List[str]
+    gate_filtered: List[str]              # grows the conviction gate rejected
+    skipped: List[str]                    # partials/holds not yet supported
+    notes: List[str]
+
+
+def execute_rebalance(
+    cfg: Config,
+    portfolio: Portfolio,
+    proposal_id: int,
+    tickers: Iterable[str],
+) -> Optional[RebalanceExecution]:
+    """Translate an approved rebalance proposal into paper opens / closes.
+
+    Roadmap §13.8 rule: grows must clear the conviction gate at current
+    prices ("the gate is the bar for committing more capital, the rebalancer
+    is the bar for how much"). Shrinks skip the gate — exits are always
+    allowed.
+
+    First-cut scope: full-open and full-close are supported; partial grows /
+    shrinks log as "not yet supported" and the proposal still flips to
+    executed. The audit captures every decision so a later iteration can add
+    partial sizing without losing the trail.
+
+    Returns None when the proposal is missing or not in `approved` status.
+    """
+    from ..data import macro as macro_data
+    from ..data import prices as price_data
+    from ..data.fundamentals import get_fundamentals
+    from ..ops import rebalance as ops_rebalance
+    from ..strategy.conviction import evaluate as gate_evaluate
+    from ..strategy.conviction_context import build_context
+    from ..strategy.ideas import generate_ideas
+    from ..strategy.scorer import read_technicals
+
+    proposal = ops_rebalance.get(proposal_id)
+    if proposal is None:
+        log.warning("execute_rebalance: proposal #%d not found", proposal_id)
+        return None
+    if proposal["status"] != "approved":
+        log.warning(
+            "execute_rebalance: proposal #%d status is '%s', not 'approved' — refusing.",
+            proposal_id, proposal["status"],
+        )
+        return None
+
+    opened: List[str] = []
+    closed: List[str] = []
+    gate_filtered: List[str] = []
+    skipped: List[str] = []
+    notes: List[str] = []
+
+    # Index current positions by ticker for the close path.
+    open_by_ticker: Dict[str, List] = {}
+    for pos in portfolio.list_open():
+        if pos.instrument != "equity":
+            continue
+        open_by_ticker.setdefault(pos.ticker.upper(), []).append(pos)
+
+    # We'll regenerate ideas + gate context lazily, only for tickers that
+    # need a gate check (i.e. opens). Closing doesn't need any of this.
+    ideas_by_ticker: Dict[str, Idea] = {}
+    macro_snap = None
+    tech_cache: Dict[str, object] = {}
+    fund_cache: Dict[str, object] = {}
+
+    def _ensure_gate_inputs():
+        nonlocal macro_snap
+        if not ideas_by_ticker:
+            for idea in generate_ideas(cfg, tickers):
+                # Only equity-long ideas can satisfy a rebalancer grow.
+                if idea.instrument == "equity" and idea.direction == "long":
+                    ideas_by_ticker[idea.ticker.upper()] = idea
+        if macro_snap is None:
+            try:
+                macro_snap = macro_data.snapshot()
+            except Exception as exc:
+                log.info("Macro unavailable; gate may fail closed: %s", exc)
+
+    # Walk the proposed changes.
+    eps = 1e-6
+    for ch in proposal.get("changes", []):
+        ticker = ch["ticker"].upper()
+        cur_w = ch["current_weight"]
+        tgt_w = ch["target_weight"]
+        is_close = abs(tgt_w) < eps and abs(cur_w) >= eps
+        is_open = abs(cur_w) < eps and abs(tgt_w) >= eps
+
+        if is_close:
+            positions = open_by_ticker.get(ticker, [])
+            if not positions:
+                notes.append(f"{ticker}: marked close but no open position found.")
+                continue
+            for pos in positions:
+                px = _mark_price(pos)
+                if px is None or px <= 0:
+                    notes.append(f"{ticker}: no mark price; close skipped for #{pos.id}.")
+                    continue
+                portfolio.close_position(pos.id, px, notes=f"rebalance #{proposal_id}")
+                closed.append(f"{ticker} #{pos.id} @ {px:.2f}")
+            audit.log_event("rebalance.executed_close", {
+                "proposal_id": proposal_id, "ticker": ticker,
+                "position_ids": [p.id for p in positions],
+            })
+            continue
+
+        if is_open:
+            _ensure_gate_inputs()
+            idea = ideas_by_ticker.get(ticker)
+            if idea is None:
+                gate_filtered.append(ticker)
+                notes.append(
+                    f"{ticker}: no qualifying long-equity idea at current prices "
+                    f"(score below threshold or insufficient history)."
+                )
+                audit.log_event("rebalance.gate_filtered", {
+                    "proposal_id": proposal_id, "ticker": ticker,
+                    "reason": "no_idea",
+                })
+                continue
+
+            # Build gate context + run conviction gate.
+            if ticker not in tech_cache:
+                df = price_data.get_history(ticker, period="6mo", interval="1d")
+                tech_cache[ticker] = read_technicals(df, cfg)
+                try:
+                    fund_cache[ticker] = get_fundamentals(ticker)
+                except Exception:
+                    fund_cache[ticker] = None
+            try:
+                gate_ctx = build_context(
+                    cfg, idea, macro=macro_snap,
+                    tech=tech_cache[ticker], fundamentals=fund_cache[ticker],
+                )
+                pick, verdicts = gate_evaluate(idea, gate_ctx)
+            except Exception as exc:
+                log.warning("Gate evaluation failed for %s: %s", ticker, exc)
+                pick = None
+                verdicts = {}
+
+            if pick is None:
+                gate_filtered.append(ticker)
+                failing = [name for name, v in verdicts.items() if not v.passed]
+                notes.append(f"{ticker}: gate blocked grow — failing: {failing}")
+                audit.log_event("rebalance.gate_filtered", {
+                    "proposal_id": proposal_id, "ticker": ticker,
+                    "failing_gates": failing,
+                })
+                continue
+
+            # Translate target_weight into shares against current equity.
+            marks_snap: Dict[str, float] = {}
+            for pos in portfolio.list_open():
+                m = _mark_price(pos)
+                if m is not None:
+                    marks_snap[pos.option_symbol or pos.ticker] = m
+            equity_now = portfolio.equity(marks_snap) or float(
+                cfg.portfolio.get("starting_cash", 100_000)
+            )
+            dollars = tgt_w * equity_now
+            qty = int(dollars / idea.last_price) if idea.last_price > 0 else 0
+            if qty <= 0:
+                notes.append(
+                    f"{ticker}: target_weight {tgt_w:.2%} on equity ${equity_now:,.0f} "
+                    f"→ 0 shares — skipped."
+                )
+                continue
+
+            cash_reserve = float(cfg.portfolio.get("cash_reserve_pct", 0.10))
+            available = portfolio.cash - equity_now * cash_reserve
+            cost = qty * idea.last_price
+            if cost > available:
+                # Trim to fit.
+                qty = int(available / idea.last_price)
+                if qty <= 0:
+                    notes.append(
+                        f"{ticker}: insufficient cash after reserve — skipped."
+                    )
+                    continue
+
+            pid = portfolio.open_position(
+                ticker=ticker, instrument="equity", direction="long",
+                quantity=qty, entry_price=idea.last_price,
+                notes=f"rebalance #{proposal_id} target_w={tgt_w:.2%}",
+            )
+            opened.append(f"{ticker} #{pid} qty {qty} @ {idea.last_price:.2f}")
+            audit.log_event("rebalance.executed_open", {
+                "proposal_id": proposal_id, "ticker": ticker,
+                "qty": qty, "price": idea.last_price,
+                "target_weight": tgt_w, "position_id": pid,
+            })
+            continue
+
+        # Anything else (grow/shrink/hold partials) — first-cut deferral.
+        if abs(tgt_w - cur_w) > eps:
+            skipped.append(ticker)
+            notes.append(
+                f"{ticker}: partial sizing ({cur_w:.2%} → {tgt_w:.2%}) "
+                f"not yet supported by executor — proposal noted, no order."
+            )
+
+    # Flip the proposal even if some grows were filtered — the *intent* was executed.
+    ops_rebalance.mark_executed(proposal_id)
+    audit.log_event("rebalance.executed", {
+        "proposal_id": proposal_id,
+        "opened": opened, "closed": closed,
+        "gate_filtered": gate_filtered, "skipped": skipped,
+    })
+    return RebalanceExecution(
+        proposal_id=proposal_id,
+        opened=opened, closed=closed,
+        gate_filtered=gate_filtered, skipped=skipped,
+        notes=notes,
+    )

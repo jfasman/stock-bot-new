@@ -333,6 +333,52 @@ def paper_rebalance_reject(ctx: click.Context, proposal_id: int) -> None:
         )
 
 
+@paper_cmd.command("rebalance-execute")
+@click.argument("proposal_id", type=int)
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.pass_context
+def paper_rebalance_execute(ctx: click.Context, proposal_id: int, watchlist: str | None) -> None:
+    """Translate an approved rebalance proposal into paper opens / closes.
+
+    Roadmap §13.8: grows clear the conviction gate at current prices;
+    shrinks (closes) skip the gate. The proposal flips to 'executed' even
+    if some grows are filtered — the intent is recorded.
+    """
+    from .engine.paper import execute_rebalance
+
+    cfg = ctx.obj["cfg"]
+    portfolio = ctx.obj["portfolio"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+    result = execute_rebalance(cfg, portfolio, proposal_id, tickers)
+    if result is None:
+        console.print(
+            f"[red]Proposal #{proposal_id} can't be executed — "
+            f"either unknown id or not in 'approved' status.[/red]"
+        )
+        return
+
+    if result.opened:
+        console.print(f"[bold green]Opened ({len(result.opened)}):[/bold green]")
+        for line in result.opened:
+            console.print(f"  + {line}")
+    if result.closed:
+        console.print(f"[bold red]Closed ({len(result.closed)}):[/bold red]")
+        for line in result.closed:
+            console.print(f"  - {line}")
+    if result.gate_filtered:
+        console.print(
+            f"[bold yellow]Gate-filtered grows ({len(result.gate_filtered)}):[/bold yellow] "
+            f"{', '.join(result.gate_filtered)}"
+        )
+    if result.skipped:
+        console.print(
+            f"[dim]Partials not yet supported: {', '.join(result.skipped)}[/dim]"
+        )
+    for note in result.notes:
+        console.print(f"[dim]→ {note}[/dim]")
+    console.print(f"\n[green]Proposal #{proposal_id} marked executed.[/green]")
+
+
 @paper_cmd.command("rebalance-log")
 @click.option("--limit", "-n", type=int, default=20, show_default=True)
 @click.option("--pending-only", is_flag=True, default=False, help="Show only pending proposals.")
@@ -534,6 +580,71 @@ def backtest_fusion(ctx: click.Context, start: str, end: str, watchlist: str | N
     console.print(
         "\n[dim]Note: fundamentals are not point-in-time; both legs share that "
         "look-ahead, so the delta is informative but the absolute numbers are inflated.[/dim]"
+    )
+
+
+@cli.command(name="backtest-rebalance")
+@click.option("--start", required=True, help="Backtest start date YYYY-MM-DD.")
+@click.option("--end", required=True, help="Backtest end date YYYY-MM-DD.")
+@click.option("--watchlist", "-w", help="Comma-separated tickers; overrides config.")
+@click.option("--rebalance-days", type=int, default=5, show_default=True)
+@click.option("--starting-cash", type=float, default=100_000.0, show_default=True)
+@click.option("--algo", default="equal_risk_contribution", show_default=True,
+              type=click.Choice(["equal_risk_contribution", "vol_target_book",
+                                 "mean_variance_with_views"]),
+              help="Rebalancer algorithm for the rebalanced leg.")
+@click.option("--target-vol", type=float, default=0.15, show_default=True,
+              help="Used by vol_target_book.")
+@click.option("--max-turnover", type=float, default=0.20, show_default=True,
+              help="Cap on total |Δweight| per rebalance.")
+@click.pass_context
+def backtest_rebalance(ctx: click.Context, start: str, end: str, watchlist: str | None,
+                        rebalance_days: int, starting_cash: float,
+                        algo: str, target_vol: float, max_turnover: float) -> None:
+    """Side-by-side: per-position sizing only vs per-position + book rebalance.
+
+    Roadmap §13.8: the empirical answer to "did book-level sizing help?"
+    Both legs run on the same window with the same signal_fn — only the
+    Backtester's book_rebalancer hook differs.
+    """
+    from .backtest.compare_rebalance import compare_rebalance
+    from .data import prices as price_data
+    from .portfolio.rebalancer import RebalanceConfig
+
+    cfg = ctx.obj["cfg"]
+    tickers = resolve_universe(cfg, watchlist.split(",") if watchlist else None)
+    console.print(f"[dim]Loading price history for {len(tickers)} tickers…[/dim]")
+    history = {t: price_data.get_history(t, period="5y", interval="1d") for t in tickers}
+
+    # Use a simple equal-weight long-only signal so the comparison isolates
+    # the book-level sizing layer rather than mixing in alpha generation.
+    def signal_fn(asof, sliced):
+        return {t: 1.0 / len(tickers) for t in tickers}
+
+    cmp = compare_rebalance(
+        history, signal_fn, start, end,
+        rebalance_config=RebalanceConfig(
+            algo=algo, target_vol=target_vol,
+            max_turnover_per_rebalance=max_turnover,
+        ),
+        starting_cash=starting_cash, rebalance_freq=rebalance_days,
+    )
+
+    console.print(f"\n[bold]Window {cmp.start} → {cmp.end}  algo={cmp.rebalancer_algo}[/bold]")
+    console.print(
+        f"  unrebalanced: CAGR {cmp.unrebalanced.cagr:+.2%}  "
+        f"Sharpe {cmp.unrebalanced.sharpe:+.2f}  "
+        f"maxDD {cmp.unrebalanced.max_drawdown:.2%}  trades {cmp.unrebalanced_trades}"
+    )
+    console.print(
+        f"  rebalanced  : CAGR {cmp.rebalanced.cagr:+.2%}  "
+        f"Sharpe {cmp.rebalanced.sharpe:+.2f}  "
+        f"maxDD {cmp.rebalanced.max_drawdown:.2%}  trades {cmp.rebalanced_trades}"
+    )
+    delta_cagr = cmp.rebalanced.cagr - cmp.unrebalanced.cagr
+    delta_sharpe = cmp.rebalanced.sharpe - cmp.unrebalanced.sharpe
+    console.print(
+        f"  [bold]Δ           : CAGR {delta_cagr:+.2%}  Sharpe {delta_sharpe:+.2f}[/bold]"
     )
 
 

@@ -94,9 +94,31 @@ def reject(proposal_id: int, *, ts: Optional[datetime] = None, by: str = "user")
         return cur.rowcount > 0
 
 
+def mark_executed(proposal_id: int, *, ts: Optional[datetime] = None) -> bool:
+    """Flip approved → executed. The engine calls this after translating the
+    proposal's changes into paper orders. Refuses re-execution: only an
+    'approved' proposal can become 'executed'.
+    """
+    init_db()
+    when = (ts or datetime.utcnow()).isoformat()
+    with connect() as db:
+        cur = db.execute(
+            """UPDATE rebalance_proposals
+               SET status='executed', decided_at=COALESCE(decided_at, ?)
+               WHERE id=? AND status='approved'""",
+            (when, proposal_id),
+        )
+        return cur.rowcount > 0
+
+
 def pending() -> List[dict]:
     """Pending proposals, newest first."""
     return _list(where="status='pending'")
+
+
+def approved() -> List[dict]:
+    """Approved-not-yet-executed proposals — fed to the engine's executor."""
+    return _list(where="status='approved'")
 
 
 def recent(limit: int = 20) -> List[dict]:

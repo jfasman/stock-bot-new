@@ -387,32 +387,61 @@ Verbatim from `docs/NON_GOALS.md` (read that file for the longer version):
 ## 11. Current status & open seams
 
 What is **production-ready for a paper demo**:
-- All eight CLI commands work end-to-end.
-- 83/83 tests pass, including a regression test for the previously-found
-  backtest cash-leak bug.
-- The Streamlit dashboard has nine tabs covering portfolio, ideas, audit
-  trail, risk, stress, score breakdown, and the leveraged-ETF registry.
-- Recent backtest over 2024 on the default watchlist:
-  `ret +20.1% | Sharpe 2.42 | MaxDD −3.1% | trades 75`.
-  Caveat: single year, no walk-forward, factor weights tuned by hand.
+- The full Phase 1 + Phase 2 roadmap (roadmap-section.md §13.1–§13.8)
+  has shipped to `main`.
+- 355/355 tests pass, including the regression test for the
+  previously-found backtest cash-leak bug.
+- The Streamlit dashboard has five top-level tabs (Today / Portfolio /
+  Ideas / Conviction / Live read-only), with a Rebalance sub-tab under
+  Portfolio and a sub-grouped audit panel under Conviction.
 
-Known limitations / would-be-useful next steps:
-- **No real broker.** A `Broker` impl for IBKR or Tradier is the
-  obvious next module if going live.
-- **Factor model is not fused into the live score.** It's a parallel
-  signal. Fusing it (e.g., 50% scorer / 50% factor composite) would
-  require schema thought because factors need a universe to rank against.
+What was on the "known gaps" list as of mid-2026 and has now **shipped**:
+- ~~No real broker.~~ → **Shipped, read-only.** `engine/brokers/`
+  has Alpaca / Tradier / IBKR Client Portal Gateway impls behind a
+  `LiveBroker` Protocol that *cannot* place orders (the read-only
+  guarantee is enforced by type, not a flag). The Phase B per-order
+  approval router is scaffolded (the `pending_orders` table + the
+  `ops/live_order_audit.py` state machine) but not yet built —
+  that's a future cluster. See roadmap §13.7.
+- ~~Factor model not fused.~~ → **Shipped.** `composite_score` now
+  takes a `factor_composite` argument and the live cycle's
+  `generate_ideas` computes a cross-sectional composite against
+  `factors.peer_pool`. Renormalizes to the two-way blend when the
+  universe is below `factors.min_universe`. `backtest-fusion` CLI
+  runs the unfused-vs-fused side-by-side on the same window. See
+  roadmap §13.6.
+- ~~No portfolio optimizer.~~ → **Shipped.** `portfolio/rebalancer.py`
+  has three pure algos — equal_risk_contribution, vol_target_book,
+  mean_variance_with_views — wired into a propose/approve/execute
+  workflow with audit (`rebalance_proposals` table). Grows clear the
+  conviction gate at current prices; shrinks skip it. `paper
+  rebalance(-approve/-reject/-execute/-log)` CLI and dashboard
+  Rebalance sub-tab. See roadmap §13.8.
+- ~~No real-time loop.~~ → **Shipped.** `paper watch` runs the
+  conviction gate + notification dispatch on a NYSE-hours cadence.
+  See roadmap §13.3.
+- ~~No alerting.~~ → **Shipped.** `ops/notify.py` defines a
+  `Notifier` Protocol with stdout / file / Pushover backends,
+  rate-limited by `notifications.max_per_day` and
+  `max_per_ticker_per_week`, with ack/snooze via CLI and dashboard.
+  See roadmap §13.3.
+
+Still on the gap list:
 - **Sentiment is rule-based.** A small transformer would lift quality
   but pulls in a dependency.
-- **No portfolio optimizer.** Sizing is per-position. Cross-position
-  optimization (mean-variance, risk parity at the book level) is
-  scaffolded in `sizing.risk_parity_weights` but not wired into the
-  paper engine.
-- **No real-time loop.** The "paper run --days N" loop steps a single
-  cycle per call; there is no scheduled job runner. A simple cron or a
-  long-running loop with sleep would suffice.
-- **No alerting.** Threshold breaches log to `audit_log` but do not
-  notify (email, Slack).
+- **Phase B live execution.** The read-only Phase A is in. Phase B
+  ships a `LiveOrderRouter` that drives the existing `pending_orders`
+  state machine into real `submit_order` calls. Out of scope for the
+  Phase 2 cluster that shipped Phase A.
+- **Partial-grow / partial-shrink in `execute_rebalance`.** First-cut
+  executor handles full-open and full-close only; partials log a
+  "not yet supported" note and the proposal still flips to
+  `executed`. The audit captures every decision so a follow-up can
+  add partial sizing without losing the trail.
+- **Point-in-time fundamentals.** The vendor returns latest; both legs
+  of `compare_fusion` share the look-ahead, so the *delta* is
+  informative but the absolute numbers are inflated. A real PIT
+  fundamentals feed is its own project.
 
 ---
 

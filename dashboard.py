@@ -28,8 +28,10 @@ st.set_page_config(
 )
 
 
-@st.cache_resource
 def _config():
+    # No @st.cache_resource: caching a dataclass instance across reruns
+    # makes new Config accessors invisible when the file is edited mid-session
+    # (the cached instance keeps its original class). YAML parse is microseconds.
     return load_config()
 
 
@@ -469,8 +471,15 @@ def _conviction_panel() -> None:
             st.code(json.dumps(json.loads(drill["pick_json"]), indent=2), language="json")
 
 
-def _rebalance_panel(cfg) -> None:
-    """Book-level rebalance proposals: list pending, approve / reject. Spec: roadmap §13.8."""
+def _rebalance_panel(cfg, portfolio) -> None:
+    """Book-level rebalance proposals: list pending, approve / reject / execute.
+
+    Spec: roadmap §13.8. Approve marks intent; Execute translates an
+    approved proposal into paper opens / closes (grows clear the
+    conviction gate, shrinks skip it).
+    """
+    from stockbot.engine.paper import execute_rebalance
+    from stockbot.data.universe import resolve_universe
     from stockbot.ops import rebalance as ops_rebalance
 
     enabled = bool(cfg.rebalance.get("enabled", False))
@@ -563,6 +572,36 @@ def _rebalance_panel(cfg) -> None:
     if b.button("Reject", key=f"rebal_reject_{selected_id}"):
         ops_rebalance.reject(selected_id)
         st.rerun()
+
+    # Execute panel — approved-not-yet-executed proposals.
+    approved_rows = [r for r in rows if r["status"] == "approved"]
+    if approved_rows:
+        st.subheader("Execute approved proposals")
+        st.caption(
+            "Grows must clear the conviction gate at current prices; "
+            "shrinks (closes) skip the gate. First cut supports full-open "
+            "and full-close only — partial sizing arrives in a follow-up."
+        )
+        exec_id = st.selectbox(
+            "Approved proposal", options=[r["id"] for r in approved_rows],
+            format_func=lambda i: f"#{i}",
+            key="rebal_approved_select",
+        )
+        if st.button("Execute now", key=f"rebal_execute_{exec_id}", type="primary"):
+            tickers = resolve_universe(cfg, None)
+            result = execute_rebalance(cfg, portfolio, exec_id, tickers)
+            if result is None:
+                st.error("Execute failed — proposal may have been re-decided.")
+            else:
+                if result.opened:
+                    st.success(f"Opened: {', '.join(result.opened)}")
+                if result.closed:
+                    st.warning(f"Closed: {', '.join(result.closed)}")
+                if result.gate_filtered:
+                    st.info(f"Gate-filtered: {', '.join(result.gate_filtered)}")
+                for n in result.notes:
+                    st.caption(f"→ {n}")
+                st.rerun()
 
 
 def _live_panel(cfg, portfolio) -> None:
@@ -1096,7 +1135,7 @@ def main() -> None:
         with sub_stress:
             _stress_panel(portfolio)
         with sub_rebal:
-            _rebalance_panel(cfg)
+            _rebalance_panel(cfg, portfolio)
 
     with tab_ideas:
         sub_scan, sub_score, sub_letf = st.tabs([

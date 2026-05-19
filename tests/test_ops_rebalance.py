@@ -96,3 +96,42 @@ def test_infeasible_proposal_still_records():
     row = ops_rebalance.get(pid)
     assert row["feasible"] == 0
     assert len(row["breaches"]) > 0
+
+
+# -- mark_executed + approved() — roadmap §13.8 execute step ----------------
+
+def test_mark_executed_flips_approved():
+    pid = ops_rebalance.record(_sample_proposal())
+    assert ops_rebalance.approve(pid)
+    assert ops_rebalance.mark_executed(pid) is True
+    assert ops_rebalance.get(pid)["status"] == "executed"
+
+
+def test_mark_executed_refuses_pending_proposal():
+    """A proposal must be approved before it can be executed."""
+    pid = ops_rebalance.record(_sample_proposal())
+    # Skipping approve.
+    assert ops_rebalance.mark_executed(pid) is False
+    assert ops_rebalance.get(pid)["status"] == "pending"
+
+
+def test_mark_executed_refuses_already_executed():
+    """No re-execution loops."""
+    pid = ops_rebalance.record(_sample_proposal())
+    ops_rebalance.approve(pid)
+    assert ops_rebalance.mark_executed(pid) is True
+    assert ops_rebalance.mark_executed(pid) is False
+
+
+def test_approved_lists_only_approved_not_executed():
+    a = ops_rebalance.record(_sample_proposal())
+    b = ops_rebalance.record(_sample_proposal())
+    c = ops_rebalance.record(_sample_proposal())
+    ops_rebalance.approve(a)
+    ops_rebalance.approve(b)
+    ops_rebalance.mark_executed(b)  # b is now executed, not approved
+    ops_rebalance.reject(c)
+    ids = [r["id"] for r in ops_rebalance.approved()]
+    assert a in ids
+    assert b not in ids   # executed
+    assert c not in ids   # rejected
